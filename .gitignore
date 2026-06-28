@@ -1,0 +1,9 @@
+node_modules/
+.data/
+state/
+*.log
+.DS_Store
+.env
+.env.*
+scratchpad/
+.verify-baseline/

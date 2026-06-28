@@ -1,0 +1,9 @@
+{
+  "name": "mcp-agent-relay",
+  "version": "0.1.0",
+  "description": "A durable, MCP-native job relay: agents dispatch work, and a Claude Code session is woken (via a channel) when it finishes — no tmux.",
+  "author": {
+    "name": "Breno Perucchi"
+  },
+  "license": "MIT"
+}
