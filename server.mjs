@@ -25,6 +25,7 @@ import {
   inboxFor,
   RelayStoreError
 } from "./lib/relay-jobs.mjs";
+import { ensureWorkerSession } from "./lib/worker-lifecycle.mjs";
 
 const SERVER_NAME = "relay";
 const SERVER_VERSION = "1.0.0";
@@ -50,6 +51,37 @@ const AGENT_ID = process.env.RELAY_AGENT || null;
 const CHANNEL_ENABLED = Boolean(AGENT_ID);
 const POLL_MS = Number(process.env.RELAY_MCP_POLL_MS) || 2000;
 const CHANNEL_TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "expired", "needs_recovery"]);
+
+// Auto-spawn a worker daemon on dispatch so jobs execute without `node worker.mjs`.
+// OFF by default (so library use and the test suite spawn nothing); the plugin's .mcp.json
+// turns it on. Only spawns for configured worker agents — logical agents are woken by the
+// channel, never auto-executed. Writes stay deny-by-default.
+const WORKER_AUTOSPAWN = Boolean(process.env.RELAY_WORKER_AUTOSPAWN);
+const WORKER_ALLOW_WRITES = Boolean(process.env.RELAY_WORKER_ALLOW_WRITES);
+const WORKER_AGENTS = new Set(
+  (process.env.RELAY_WORKER_AGENTS || "codex")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+const WORKER_INTERVAL_MS = Number(process.env.RELAY_WORKER_INTERVAL_MS) || undefined;
+
+// Fire-and-forget: never adds latency to dispatch, never throws into the response path.
+// ensureWorkerSession is itself single-flight per agent, so a burst of dispatches coalesces.
+function maybeAutoSpawnWorker(to) {
+  if (!WORKER_AUTOSPAWN || !WORKER_AGENTS.has(to)) return;
+  setImmediate(() => {
+    Promise.resolve()
+      .then(() =>
+        ensureWorkerSession(CWD, {
+          agent: to,
+          allowWrites: WORKER_ALLOW_WRITES,
+          intervalMs: WORKER_INTERVAL_MS
+        })
+      )
+      .catch((err) => log(`auto-spawn worker for "${to}" failed: ${err?.message || err}`));
+  });
+}
 
 const JSON_RPC = {
   PARSE_ERROR: -32700,
@@ -216,9 +248,12 @@ function callTool(name, args = {}) {
         to: args.to,
         from: AGENT_ID, // server-injected identity; never trusted from args
         payload: args.task,
-        ttlMs: args.ttl_ms ?? null
+        ttlMs: args.ttl_ms ?? null,
+        // A write job whose lease expires must PARK (needs_recovery), never auto-rerun.
+        leaseExpiryPolicy: args.task?.write === true ? "park" : "requeue"
       });
       scheduleNotify(); // same-process write: nudge subscribers of this inbox
+      maybeAutoSpawnWorker(args.to); // gated; fire-and-forget; only for worker agents
       return toolResult({ job_id: out.jobId, deduped: out.deduped, state: out.job.relayState });
     }
     case "poll": {

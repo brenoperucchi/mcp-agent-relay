@@ -10,6 +10,9 @@
 //
 // Writes are denied by default; pass --allow-writes to let write jobs run.
 
+import fs from "node:fs";
+import path from "node:path";
+
 import { drainOnce, runWorkerLoop } from "./lib/relay-worker.mjs";
 
 function parseArgs(argv) {
@@ -18,7 +21,9 @@ function parseArgs(argv) {
     once: false,
     allowWrites: false,
     intervalMs: 1000,
-    workerId: `cli-${process.pid}`
+    workerId: `cli-${process.pid}`,
+    heartbeatFile: null,
+    workerToken: null
   };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -27,8 +32,19 @@ function parseArgs(argv) {
     else if (token === "--allow-writes") args.allowWrites = true;
     else if (token === "--interval") args.intervalMs = Number(argv[++i]) || args.intervalMs;
     else if (token === "--worker-id") args.workerId = argv[++i];
+    else if (token === "--heartbeat-file") args.heartbeatFile = argv[++i];
+    else if (token === "--worker-token") args.workerToken = argv[++i];
   }
   return args;
+}
+
+// Liveness ping for the daemon lifecycle (worker-lifecycle.mjs). Atomic (temp + rename in
+// the same dir) so a concurrent reader never sees a half-written heartbeat.
+function writeHeartbeat(file, token) {
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `.${path.basename(file)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, token, ts: Date.now() }));
+  fs.renameSync(tmp, file);
 }
 
 async function main() {
@@ -43,10 +59,44 @@ async function main() {
   }
 
   const controller = new AbortController();
-  process.on("SIGINT", () => controller.abort());
-  process.on("SIGTERM", () => controller.abort());
+  let hbTimer = null;
+  const stopHeartbeat = () => {
+    if (hbTimer) {
+      clearInterval(hbTimer);
+      hbTimer = null;
+    }
+  };
+  const shutdown = () => {
+    controller.abort();
+    stopHeartbeat();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  // Daemon mode (spawned by worker-lifecycle): emit a heartbeat so the lifecycle can
+  // confirm readiness and liveness. Immediate write = fast readiness; then every interval.
+  if (args.heartbeatFile && args.workerToken) {
+    try {
+      writeHeartbeat(args.heartbeatFile, args.workerToken);
+    } catch {
+      /* best-effort */
+    }
+    hbTimer = setInterval(() => {
+      try {
+        writeHeartbeat(args.heartbeatFile, args.workerToken);
+      } catch {
+        /* best-effort; a missed beat only delays liveness, never loses a job */
+      }
+    }, args.intervalMs);
+    hbTimer.unref?.(); // never keep the process alive on the heartbeat timer alone
+  }
+
   process.stderr.write(`[relay-worker] draining agent=${args.agent} writes=${args.allowWrites} (Ctrl-C to stop)\n`);
-  await runWorkerLoop(cwd, { ...opts, intervalMs: args.intervalMs, signal: controller.signal });
+  try {
+    await runWorkerLoop(cwd, { ...opts, intervalMs: args.intervalMs, signal: controller.signal });
+  } finally {
+    stopHeartbeat();
+  }
 }
 
 main().catch((err) => {

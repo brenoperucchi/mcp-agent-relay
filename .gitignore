@@ -7,3 +7,7 @@ state/
 .env.*
 scratchpad/
 .verify-baseline/
+
+# Codex review artifacts (local only)
+.codex-*.out
+.codex-*-stderr.log
