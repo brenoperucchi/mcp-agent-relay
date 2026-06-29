@@ -77,29 +77,33 @@ the workspace); you don't paste its contents. Requires a worker to execute the j
 auto-spawns when `RELAY_WORKER_AUTOSPAWN` is set for the server — the launcher and the plugin's
 `.mcp.json` set it).
 
-### As a raw MCP server (any MCP client)
+### As a bare MCP server (Claude Code `mcp add`)
 
-```jsonc
-// .mcp.json in your project
-{
-  "mcpServers": {
-    "agentrelay": {
-      "command": "node",
-      "args": ["/path/to/mcp-agent-relay/server.mjs"],
-      "env": { "RELAY_AGENT": "claude-main" }
-    }
-  }
-}
+```bash
+claude mcp add --scope user agentrelay \
+  node /path/to/mcp-agent-relay/server.mjs \
+  -e RELAY_AGENT=claude-main \
+  -e RELAY_WORKER_AUTOSPAWN=1 \
+  -e RELAY_WORKER_AGENTS=codex
 ```
 
-The `mcpServers` key (`agentrelay`) is what Claude Code namespaces the tools by —
-`mcp__agentrelay__dispatch`, `mcp__agentrelay__poll` — and it must match the channel flag
-(`server:agentrelay`). Pick a unique key so it never collides with another MCP server.
+The store defaults to `~/.mcp-agent-relay/state`. Override with `-e RELAY_DATA_DIR=/your/path`.
 
-> **Bare vs. plugin install change the names.** Installed as a *plugin*, the same server is
-> namespaced by the plugin: tools become `mcp__plugin_mcp-agent-relay_agentrelay__dispatch` /
-> `…__poll`, and the channel loads with `plugin:mcp-agent-relay@mcp-agent-relay` (not `server:agentrelay`). The
-> `<channel source="agentrelay">` tag keeps the bare key either way.
+Then launch Claude with the bare channel flag — use `bin/claude-relay --bare` (or directly):
+
+```bash
+claude --dangerously-load-development-channels server:agentrelay
+```
+
+> **Plugin vs. bare install change the tool names and channel flag.**
+>
+> | | Plugin install | Bare `mcp add` |
+> |---|---|---|
+> | Tools | `mcp__plugin_mcp-agent-relay_agentrelay__dispatch` | `mcp__agentrelay__dispatch` |
+> | Channel flag | `plugin:mcp-agent-relay@mcp-agent-relay` | `server:agentrelay` |
+> | `claude-relay` | `claude-relay` | `claude-relay --bare` |
+>
+> The `<channel source="agentrelay">` tag is the same in both cases.
 
 No build step, no runtime dependencies — Node ≥ 18.18 and the standard library only.
 
