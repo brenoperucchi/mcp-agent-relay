@@ -23,7 +23,8 @@ function parseArgs(argv) {
     intervalMs: 1000,
     workerId: `cli-${process.pid}`,
     heartbeatFile: null,
-    workerToken: null
+    workerToken: null,
+    idleTimeoutMs: null
   };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -34,6 +35,7 @@ function parseArgs(argv) {
     else if (token === "--worker-id") args.workerId = argv[++i];
     else if (token === "--heartbeat-file") args.heartbeatFile = argv[++i];
     else if (token === "--worker-token") args.workerToken = argv[++i];
+    else if (token === "--idle-timeout") args.idleTimeoutMs = Number(argv[++i]) || null;
   }
   return args;
 }
@@ -93,7 +95,7 @@ async function main() {
 
   process.stderr.write(`[relay-worker] draining agent=${args.agent} writes=${args.allowWrites} (Ctrl-C to stop)\n`);
   try {
-    await runWorkerLoop(cwd, { ...opts, intervalMs: args.intervalMs, signal: controller.signal });
+    await runWorkerLoop(cwd, { ...opts, intervalMs: args.intervalMs, idleTimeoutMs: args.idleTimeoutMs, signal: controller.signal });
   } finally {
     stopHeartbeat();
   }

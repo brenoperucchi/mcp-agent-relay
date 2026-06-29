@@ -314,6 +314,55 @@ test("runWorkerLoop para rápido ao abortar durante o sono ocioso", async () => 
   assert.ok(Date.now() - start < 1000); // não esperou os 5000ms do intervalo
 });
 
+test("runWorkerLoop sai automaticamente após idleTimeoutMs sem jobs", async () => {
+  const cwd = setup();
+  const start = Date.now();
+  await worker.runWorkerLoop(cwd, {
+    agentId: "codex",
+    intervalMs: 20,
+    idleTimeoutMs: 100,
+    runTurn: okTurn
+  });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed >= 100, `esperado >= 100ms, obtido ${elapsed}ms`);
+  assert.ok(elapsed < 1000, `esperado < 1000ms, obtido ${elapsed}ms`);
+});
+
+test("runWorkerLoop: idleTimeout reseta quando um job é processado", async () => {
+  const cwd = setup();
+  relay.enqueue(cwd, { requestId: "idle-reset", to: "codex", payload: { prompt: "x" } });
+  const start = Date.now();
+  await worker.runWorkerLoop(cwd, {
+    agentId: "codex",
+    intervalMs: 20,
+    idleTimeoutMs: 100,
+    runTurn: okTurn
+  });
+  const elapsed = Date.now() - start;
+  // processou o job antes e depois ficou idle >= 100ms antes de sair
+  assert.ok(elapsed >= 100, `esperado >= 100ms, obtido ${elapsed}ms`);
+  assert.ok(elapsed < 2000, `esperado < 2000ms, obtido ${elapsed}ms`);
+  assert.equal(relay.findByRequestId(cwd, "idle-reset")?.relayState, "completed");
+});
+
+test("runWorkerLoop: idleTimeoutMs=null nunca sai por ociosidade (para apenas via signal)", async () => {
+  const cwd = setup();
+  const controller = new AbortController();
+  const start = Date.now();
+  const loopP = worker.runWorkerLoop(cwd, {
+    agentId: "codex",
+    intervalMs: 30,
+    idleTimeoutMs: null,
+    signal: controller.signal,
+    runTurn: okTurn
+  });
+  await sleep(150);
+  controller.abort();
+  await loopP;
+  // Se idleTimeoutMs fosse 0 ou algo que sai imediatamente, o elapsed seria << 150
+  assert.ok(Date.now() - start >= 100, "loop não deveria sair antes do abort");
+});
+
 test("runWorkerLoop abortando durante um job em execução libera o job (read-only)", async () => {
   const cwd = setup();
   const e = relay.enqueue(cwd, { requestId: "r1", to: "codex", payload: { prompt: "x" } });
