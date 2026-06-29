@@ -96,6 +96,11 @@ The `mcpServers` key (`agentrelay`) is what Claude Code namespaces the tools by 
 `mcp__agentrelay__dispatch`, `mcp__agentrelay__poll` — and it must match the channel flag
 (`server:agentrelay`). Pick a unique key so it never collides with another MCP server.
 
+> **Bare vs. plugin install change the names.** Installed as a *plugin*, the same server is
+> namespaced by the plugin: tools become `mcp__plugin_mcp-agent-relay_agentrelay__dispatch` /
+> `…__poll`, and the channel loads with `plugin:mcp-agent-relay` (not `server:agentrelay`). The
+> `<channel source="agentrelay">` tag keeps the bare key either way.
+
 No build step, no runtime dependencies — Node ≥ 18.18 and the standard library only.
 
 ---
@@ -136,14 +141,17 @@ is parked as `needs_recovery` — never silently re-run.
 To have a *running* Claude session woken when a job it dispatched finishes:
 
 ```bash
+# plugin install:
+RELAY_AGENT=claude-main claude --dangerously-load-development-channels plugin:mcp-agent-relay
+# bare `claude mcp add agentrelay` install instead:
 RELAY_AGENT=claude-main claude --dangerously-load-development-channels server:agentrelay
-# or just: bin/claude-relay   (wraps the flag + sets RELAY_AGENT and worker auto-spawn)
+# or just: bin/claude-relay   (wraps the plugin flag + sets RELAY_AGENT and worker auto-spawn)
 ```
 
 When a terminal job (`from === RELAY_AGENT`) finishes, or a new job lands in this agent's inbox
 (`to === RELAY_AGENT`), the server emits `notifications/claude/channel`. It arrives as
-`<channel source="agentrelay">…</channel>` and Claude acts on it — typically by calling
-`mcp__agentrelay__poll`.
+`<channel source="agentrelay">…</channel>` and Claude acts on it — typically by calling the
+agentrelay `poll` tool.
 
 **Injection-safe:** the channel content is a minimal envelope (`job_id`, `state`) telling Claude
 to `poll` for the result. The untrusted job payload is **never** placed in the channel content.

@@ -13,7 +13,7 @@ Steps:
 
 1. Choose a fresh unique `request_id`, e.g. `review-` + a short random suffix.
 
-2. Call `mcp__agentrelay__dispatch` with:
+2. Call `mcp__plugin_mcp-agent-relay_agentrelay__dispatch` with:
    - `to`: `"codex"`
    - `request_id`: the id from step 1
    - `task`: an **object** (not a string) of the form `{ "prompt": "<REVIEW PROMPT>" }`
@@ -25,7 +25,7 @@ Steps:
    > `VERDICT: approve | approve_with_changes | needs_rework`, then a numbered list of REQUIRED
    > (blocking) changes and a separate list of OPTIONAL suggestions. Be terse; no praise.
 
-3. Note the returned `job_id`. Poll for the result: call `mcp__agentrelay__poll` with that
+3. Note the returned `job_id`. Poll for the result: call `mcp__plugin_mcp-agent-relay_agentrelay__poll` with that
    `job_id`. If `state` is not terminal (i.e. not one of `completed` / `failed` /
    `needs_recovery` / `cancelled` / `expired`), wait briefly (you may run `sleep 3` via Bash),
    then poll again. Repeat until the state is terminal (give it up to ~20 polls — a Codex turn

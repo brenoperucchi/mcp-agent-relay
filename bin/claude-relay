@@ -6,9 +6,10 @@
 #   claude-relay                       # uses RELAY_AGENT=claude-main, codex worker auto-spawn
 #   RELAY_AGENT=my-id claude-relay     # override the session identity
 #
-# Needs Claude Code >= 2.1.80 + Anthropic auth. The server registration key "agentrelay" must
-# match the channel flag below (and the mcpServers key in .mcp.json / your `claude mcp add`).
+# Needs Claude Code >= 2.1.80 + Anthropic auth. This assumes the plugin "mcp-agent-relay" is
+# installed (the channel loads as plugin:<plugin-name>). For a BARE `claude mcp add agentrelay`
+# install instead, change the flag to `server:agentrelay`.
 export RELAY_AGENT="${RELAY_AGENT:-claude-main}"
 export RELAY_WORKER_AUTOSPAWN="${RELAY_WORKER_AUTOSPAWN:-1}"
 export RELAY_WORKER_AGENTS="${RELAY_WORKER_AGENTS:-codex}"
-exec claude --dangerously-load-development-channels server:agentrelay "$@"
+exec claude --dangerously-load-development-channels plugin:mcp-agent-relay "$@"
