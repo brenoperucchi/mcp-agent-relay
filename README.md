@@ -65,7 +65,17 @@ claude plugin install mcp-agent-relay
 ```
 
 The plugin declares the `agentrelay` MCP server in [`.mcp.json`](.mcp.json); Claude Code
-auto-connects it at session start.
+auto-connects it at session start. Installing the plugin (vs. a bare `claude mcp add`) also
+ships the slash command below.
+
+#### Slash command: review a file with Codex
+
+Once the plugin is installed, `/mcp-agent-relay:review <path> [focus notes]` dispatches an
+adversarial review of the file to the `codex` worker through the relay and waits for the verdict —
+synchronous from your side (dispatch → poll → result). Codex reads the file itself (read-only over
+the workspace); you don't paste its contents. Requires a worker to execute the job (the daemon
+auto-spawns when `RELAY_WORKER_AUTOSPAWN` is set for the server — the launcher and the plugin's
+`.mcp.json` set it).
 
 ### As a raw MCP server (any MCP client)
 
