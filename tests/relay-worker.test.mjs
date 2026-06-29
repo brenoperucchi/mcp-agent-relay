@@ -345,6 +345,38 @@ test("runWorkerLoop: idleTimeout reseta quando um job é processado", async () =
   assert.equal(relay.findByRequestId(cwd, "idle-reset")?.relayState, "completed");
 });
 
+test("runWorkerLoop: idleTimeoutMs menor que intervalMs sai dentro do budget (não dorme o intervalo inteiro)", async () => {
+  const cwd = setup();
+  let called = false;
+  const start = Date.now();
+  await worker.runWorkerLoop(cwd, {
+    agentId: "codex",
+    intervalMs: 1000,
+    idleTimeoutMs: 100,
+    runTurn: async () => {
+      called = true;
+      return okTurn();
+    }
+  });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed >= 100, `esperado >= 100ms, obtido ${elapsed}ms`);
+  // Sem o bound, o loop dormiria o intervalo inteiro (1000ms) antes de checar o timeout.
+  assert.ok(elapsed < 500, `esperado < 500ms (não o intervalo inteiro), obtido ${elapsed}ms`);
+  assert.equal(called, false);
+});
+
+test("runWorkerLoop: idleTimeoutMs=0 sai após o primeiro drain ocioso", async () => {
+  const cwd = setup();
+  const start = Date.now();
+  await worker.runWorkerLoop(cwd, {
+    agentId: "codex",
+    intervalMs: 1000,
+    idleTimeoutMs: 0,
+    runTurn: okTurn
+  });
+  assert.ok(Date.now() - start < 500, "idleTimeoutMs=0 deveria sair quase imediatamente");
+});
+
 test("runWorkerLoop: idleTimeoutMs=null nunca sai por ociosidade (para apenas via signal)", async () => {
   const cwd = setup();
   const controller = new AbortController();

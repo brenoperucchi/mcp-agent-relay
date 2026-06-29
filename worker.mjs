@@ -35,7 +35,11 @@ function parseArgs(argv) {
     else if (token === "--worker-id") args.workerId = argv[++i];
     else if (token === "--heartbeat-file") args.heartbeatFile = argv[++i];
     else if (token === "--worker-token") args.workerToken = argv[++i];
-    else if (token === "--idle-timeout") args.idleTimeoutMs = Number(argv[++i]) || null;
+    else if (token === "--idle-timeout") {
+      // Keep 0 (exit after the first idle drain); only null out invalid/negative input.
+      const n = Number(argv[++i]);
+      args.idleTimeoutMs = Number.isFinite(n) && n >= 0 ? n : null;
+    }
   }
   return args;
 }
