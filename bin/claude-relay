@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # claude-relay — launch Claude Code with the relay channel enabled (hands-free "job done"
-# wake, no tmux). Equivalent to running `claude` with the channel flag + a RELAY_AGENT
-# identity. All arguments are forwarded to `claude`.
+# wake, no tmux). Exports the relay env directly so behaviour does not depend on what the
+# MCP registration injects. All arguments are forwarded to `claude`.
 #
-#   claude-relay                       # uses RELAY_AGENT=claude-main
+#   claude-relay                       # uses RELAY_AGENT=claude-main, codex worker auto-spawn
 #   RELAY_AGENT=my-id claude-relay     # override the session identity
 #
-# The channel is a Claude Code research preview: needs Claude Code >= 2.1.80 and Anthropic
-# auth. The server name "relay" must match how the MCP server is registered.
-exec env RELAY_AGENT="${RELAY_AGENT:-claude-main}" \
-  claude --dangerously-load-development-channels server:relay "$@"
+# Needs Claude Code >= 2.1.80 + Anthropic auth. The server registration key "agentrelay" must
+# match the channel flag below (and the mcpServers key in .mcp.json / your `claude mcp add`).
+export RELAY_AGENT="${RELAY_AGENT:-claude-main}"
+export RELAY_WORKER_AUTOSPAWN="${RELAY_WORKER_AUTOSPAWN:-1}"
+export RELAY_WORKER_AGENTS="${RELAY_WORKER_AGENTS:-codex}"
+exec claude --dangerously-load-development-channels server:agentrelay "$@"

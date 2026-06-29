@@ -64,8 +64,8 @@ claude plugin marketplace add <your-org>/mcp-agent-relay
 claude plugin install mcp-agent-relay
 ```
 
-The plugin declares the relay MCP server in [`.mcp.json`](.mcp.json); Claude Code auto-connects
-it at session start.
+The plugin declares the `agentrelay` MCP server in [`.mcp.json`](.mcp.json); Claude Code
+auto-connects it at session start.
 
 ### As a raw MCP server (any MCP client)
 
@@ -73,7 +73,7 @@ it at session start.
 // .mcp.json in your project
 {
   "mcpServers": {
-    "relay": {
+    "agentrelay": {
       "command": "node",
       "args": ["/path/to/mcp-agent-relay/server.mjs"],
       "env": { "RELAY_AGENT": "claude-main" }
@@ -81,6 +81,10 @@ it at session start.
   }
 }
 ```
+
+The `mcpServers` key (`agentrelay`) is what Claude Code namespaces the tools by —
+`mcp__agentrelay__dispatch`, `mcp__agentrelay__poll` — and it must match the channel flag
+(`server:agentrelay`). Pick a unique key so it never collides with another MCP server.
 
 No build step, no runtime dependencies — Node ≥ 18.18 and the standard library only.
 
@@ -122,12 +126,14 @@ is parked as `needs_recovery` — never silently re-run.
 To have a *running* Claude session woken when a job it dispatched finishes:
 
 ```bash
-RELAY_AGENT=claude-main claude --dangerously-load-development-channels server:relay
+RELAY_AGENT=claude-main claude --dangerously-load-development-channels server:agentrelay
+# or just: bin/claude-relay   (wraps the flag + sets RELAY_AGENT and worker auto-spawn)
 ```
 
 When a terminal job (`from === RELAY_AGENT`) finishes, or a new job lands in this agent's inbox
 (`to === RELAY_AGENT`), the server emits `notifications/claude/channel`. It arrives as
-`<channel source="relay">…</channel>` and Claude acts on it — typically by calling `poll`.
+`<channel source="agentrelay">…</channel>` and Claude acts on it — typically by calling
+`mcp__agentrelay__poll`.
 
 **Injection-safe:** the channel content is a minimal envelope (`job_id`, `state`) telling Claude
 to `poll` for the result. The untrusted job payload is **never** placed in the channel content.

@@ -155,7 +155,7 @@ test("initialize ecoa a protocolVersion suportada + capabilities + serverInfo", 
     assert.equal(res.result.protocolVersion, "2025-11-25");
     assert.equal(res.result.capabilities.resources.subscribe, true);
     assert.ok(res.result.capabilities.tools);
-    assert.equal(res.result.serverInfo.name, "relay");
+    assert.equal(res.result.serverInfo.name, "agentrelay");
   } finally {
     server.stop();
   }

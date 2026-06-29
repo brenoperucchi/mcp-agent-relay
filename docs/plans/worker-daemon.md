@@ -161,7 +161,7 @@ timeout/cancel path end-to-end.
 ```sh
 #!/usr/bin/env bash
 exec env RELAY_AGENT="${RELAY_AGENT:-claude-main}" \
-  claude --dangerously-load-development-channels server:relay "$@"
+  claude --dangerously-load-development-channels server:agentrelay "$@"
 ```
 README documents it (server-name `relay`; marketplace install namespaces it). `.cmd` shim is a
 Windows follow-up `[CR-opt-3]`.
