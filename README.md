@@ -4,7 +4,7 @@
 session is *woken* — via a [channel](#the-channel-no-more-tmux) — the moment a job finishes.
 No `tmux send-keys`, no file-watching daemon, no point-to-point socket to keep alive.
 
-> Status: **v0.1 — research preview.** The store, MCP facade, and worker are covered by 63
+> Status: **v0.1 — research preview.** The store, MCP facade, and worker are covered by 86
 > tests. The "wake a running session" channel rides on a Claude Code research-preview feature
 > (see [caveats](#requirements--caveats)).
 
@@ -131,10 +131,16 @@ node worker.mjs --agent codex --once
 
 # long-running loop, allowed to run write jobs
 node worker.mjs --agent codex --allow-writes --interval 1000
+
+# exit automatically after 5 minutes of idleness (no queued jobs)
+node worker.mjs --agent codex --idle-timeout 300000
 ```
 
 Write jobs are **deny-by-default** (`--allow-writes` to opt in). A write job whose lease expires
 is parked as `needs_recovery` — never silently re-run.
+
+`--idle-timeout <ms>` makes the worker exit after that many milliseconds with no jobs processed.
+Omit it (or pass `0`) to run until SIGINT/SIGTERM. Useful for ephemeral workers spawned on demand.
 
 ### The channel (no more tmux)
 
@@ -183,7 +189,7 @@ unchanged.
 ## Development
 
 ```bash
-node --test        # 63 tests: store, facade + channel, worker
+node --test        # 86 tests: store, facade + channel, worker
 ```
 
 ## License
