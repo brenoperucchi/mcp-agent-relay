@@ -166,6 +166,52 @@ agentrelay `poll` tool.
 **Injection-safe:** the channel content is a minimal envelope (`job_id`, `state`) telling Claude
 to `poll` for the result. The untrusted job payload is **never** placed in the channel content.
 
+### The Stop hook (wake-up without the channel flag)
+
+The channel is the only *push* path Claude Code exposes, but it needs
+`--dangerously-load-development-channels` (a per-session confirmation dialog) and is silently
+broken for bare `server:` channels on recent builds
+([anthropics/claude-code#71792](https://github.com/anthropics/claude-code/issues/71792)). The
+**Stop hook** is the pull-side equivalent: when Claude is about to end its turn, the hook
+inspects the relay store and — if a job this agent dispatched finished, or a new job landed in
+its inbox — blocks the stop and feeds Claude a reason, giving it one more turn to `poll`. No
+flag, no dialog; works with a plain `claude mcp add` or plugin install.
+
+Wire it with the helper (idempotent; merges into project `.claude/settings.json`, `--global` for
+`~/.claude/settings.json`, `--remove` to tear out, `--print` to preview):
+
+```bash
+node bin/relay-install-hook.mjs            # project .claude/settings.json
+node bin/relay-install-hook.mjs --global   # ~/.claude/settings.json
+```
+
+Or wire the **same** command by hand on two events (`SessionStart` seeds the baseline so the
+first stop isn't flooded with old jobs; `Stop` surfaces new transitions — full example in
+[`docs/examples/settings.hooks.json`](docs/examples/settings.hooks.json)):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command",
+      "command": "node /ABS/PATH/mcp-agent-relay/bin/relay-stop-hook.mjs" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "node /ABS/PATH/mcp-agent-relay/bin/relay-stop-hook.mjs" }] }]
+  }
+}
+```
+
+Requires `RELAY_AGENT` in the environment (the session identity) — without it the hook is a
+silent no-op, exactly like the channel with no agent id. Event parity with the channel is exact:
+a terminal job with `from === RELAY_AGENT`, or a queued job with `to === RELAY_AGENT`. Optional
+knobs: `RELAY_HOOK_WAIT_MS>0` makes a stop **long-poll** (bounded) for an in-flight dispatch to
+finish instead of settling immediately; `RELAY_HOOK_POLL_MS` tunes the poll interval. The hook
+**fails open** — any internal error allows the stop, never wedging the session.
+
+| Path | Dialog | Inbound on recent builds | Install |
+| --- | --- | --- | --- |
+| Channel (`--dangerously-load-development-channels`) | yes | broken (#71792) | `bin/claude-relay` |
+| **Stop hook** | **no** | **works** | `claude mcp add` / plugin + 2 hook lines |
+
 ---
 
 ## Swap the executor
@@ -186,6 +232,9 @@ unchanged.
   (not Bedrock/Vertex), and the `--dangerously-load-development-channels` flag. The relay is
   fully usable *without* the channel — `poll` and the inbox resource are always the source of
   truth; the channel is a wake-up signal, not the system of record.
+- **Prefer the Stop hook for hands-free wake-up on current builds:** the channel flag is broken
+  for bare `server:` channels on recent Claude Code ([#71792](https://github.com/anthropics/claude-code/issues/71792)).
+  The Stop hook (above) needs no flag or dialog and works with a plain `mcp add` / plugin install.
 - **Single machine, v0.1.** The store is file-backed and coordinated by an interprocess lock.
   Multi-machine (shared substrate + cross-agent auth) is a deliberate future phase, not a
   redesign — the routing model (identity + inbox + claim) already accounts for it.

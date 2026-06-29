@@ -1,0 +1,25 @@
+{
+  "//": "Drop these two hook entries into your Claude Code settings.json (project .claude/settings.json or ~/.claude/settings.json). They give the relay a hands-free wake-up WITHOUT --dangerously-load-development-channels: when Claude is about to end its turn, the Stop hook checks the relay store and, if a job this agent dispatched finished (or a new job landed in its inbox), blocks the stop and feeds Claude a reason so it polls. SessionStart seeds the baseline so the first stop is not flooded with old jobs. Replace the absolute path below with your checkout, and ensure RELAY_AGENT is set in the launching environment (the session identity). Optional env: RELAY_HOOK_WAIT_MS=<ms> to long-poll for an in-flight dispatch before settling; RELAY_HOOK_POLL_MS=<ms> to tune the poll interval.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /ABS/PATH/mcp-agent-relay/bin/relay-stop-hook.mjs"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /ABS/PATH/mcp-agent-relay/bin/relay-stop-hook.mjs"
+          }
+        ]
+      }
+    ]
+  }
+}
