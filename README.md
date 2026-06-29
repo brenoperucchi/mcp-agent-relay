@@ -207,6 +207,14 @@ knobs: `RELAY_HOOK_WAIT_MS>0` makes a stop **long-poll** (bounded) for an in-fli
 finish instead of settling immediately; `RELAY_HOOK_POLL_MS` tunes the poll interval. The hook
 **fails open** — any internal error allows the stop, never wedging the session.
 
+> **The hook must resolve the same store as the MCP server.** Both derive the state dir from
+> `RELAY_DATA_DIR` (or `$CLAUDE_PLUGIN_DATA/state`, then `~/.mcp-agent-relay/state`) plus the
+> workspace slug. Claude Code launches hooks with the session environment, so they line up by
+> default — but if you set `RELAY_DATA_DIR` for the server, set the *same* value for the hook, or
+> it will read an empty store and never wake. (Do **not** point `RELAY_DATA_DIR` at an
+> unexpanded `${RELAY_DATA_DIR}` — that lands the store in a literal `${RELAY_DATA_DIR}/` folder
+> under your cwd.)
+
 | Path | Dialog | Inbound on recent builds | Install |
 | --- | --- | --- | --- |
 | Channel (`--dangerously-load-development-channels`) | yes | broken (#71792) | `bin/claude-relay` |

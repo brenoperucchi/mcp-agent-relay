@@ -5,7 +5,6 @@
       "args": ["${CLAUDE_PLUGIN_ROOT}/server.mjs"],
       "env": {
         "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
-        "RELAY_DATA_DIR": "${RELAY_DATA_DIR}",
         "RELAY_AGENT": "${RELAY_AGENT}",
         "RELAY_WORKER_AUTOSPAWN": "1"
       }
