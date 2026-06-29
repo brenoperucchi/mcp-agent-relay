@@ -3,13 +3,28 @@
 # wake, no tmux). Exports the relay env directly so behaviour does not depend on what the
 # MCP registration injects. All arguments are forwarded to `claude`.
 #
-#   claude-relay                       # uses RELAY_AGENT=claude-main, codex worker auto-spawn
+#   claude-relay                       # plugin install (default)
+#   claude-relay --bare                # bare install: `claude mcp add agentrelay`
 #   RELAY_AGENT=my-id claude-relay     # override the session identity
 #
-# Needs Claude Code >= 2.1.80 + Anthropic auth. This assumes the plugin "mcp-agent-relay" is
-# installed; a plugin channel must be tagged plugin:<plugin-name>@<marketplace>. For a BARE
-# `claude mcp add agentrelay` install instead, change the flag to `server:agentrelay`.
+# Plugin install (default): requires `claude plugin install mcp-agent-relay`.
+# Bare install (--bare):    requires `claude mcp add agentrelay node /path/to/server.mjs`.
+#
+# Needs Claude Code >= 2.1.80 + Anthropic auth.
+
 export RELAY_AGENT="${RELAY_AGENT:-claude-main}"
 export RELAY_WORKER_AUTOSPAWN="${RELAY_WORKER_AUTOSPAWN:-1}"
 export RELAY_WORKER_AGENTS="${RELAY_WORKER_AGENTS:-codex}"
-exec claude --dangerously-load-development-channels plugin:mcp-agent-relay@mcp-agent-relay "$@"
+
+CHANNEL_FLAG="plugin:mcp-agent-relay@mcp-agent-relay"
+PASSTHROUGH=()
+
+for arg in "$@"; do
+  if [[ "$arg" == "--bare" ]]; then
+    CHANNEL_FLAG="server:agentrelay"
+  else
+    PASSTHROUGH+=("$arg")
+  fi
+done
+
+exec claude --dangerously-load-development-channels "$CHANNEL_FLAG" "${PASSTHROUGH[@]}"
