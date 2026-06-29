@@ -212,6 +212,29 @@ test("dispatch retorna job_id e poll devolve o estado (round-trip via store)", a
   }
 });
 
+test("dispatch: task-string de write é coercido para objeto e parka (leaseExpiryPolicy=park)", async () => {
+  const env = makeEnv();
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const disp = JSON.parse(
+      (
+        await server.request("tools/call", {
+          name: "dispatch",
+          arguments: { to: "codex", task: '{"prompt":"x","write":true}', request_id: "strwrite" }
+        })
+      ).result.content[0].text
+    );
+    const store = JSON.parse(fs.readFileSync(storeFileFor(env), "utf8"));
+    const job = store.jobs.find((j) => j.id === disp.job_id);
+    assert.equal(job.leaseExpiryPolicy, "park"); // write detected despite string input
+    assert.equal(job.payload.write, true); // stored as an OBJECT, not the raw string
+    assert.equal(job.payload.prompt, "x");
+  } finally {
+    server.stop();
+  }
+});
+
 test("dispatch deduplica por request_id", async () => {
   const server = startServer(makeEnv());
   try {

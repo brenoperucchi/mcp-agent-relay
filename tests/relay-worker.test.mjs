@@ -52,6 +52,44 @@ test("processJob roda o turno e completa o job (result durável)", async () => {
   assert.equal(job.result.output, "done");
 });
 
+test("payload em string JSON é tolerado (coerce) e executa", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, { requestId: "rs", to: "codex", payload: '{"prompt":"hi"}' });
+  const c = relay.claim(cwd, e.jobId, "w1", 1000);
+  let gotPrompt = null;
+  const r = await worker.processJob(cwd, c.job, c.claimToken, {
+    runTurn: async (_cwd, opts) => {
+      gotPrompt = opts.prompt;
+      return { ok: true, output: "done", threadId: "t", touchedFiles: [] };
+    }
+  });
+  assert.equal(r.outcome, "completed");
+  assert.equal(gotPrompt, "hi");
+});
+
+test("coercePayload: só string-JSON-de-objeto vira objeto; resto fica intocado", () => {
+  assert.deepEqual(worker.coercePayload('{"prompt":"x"}'), { prompt: "x" });
+  assert.deepEqual(worker.coercePayload({ prompt: "x" }), { prompt: "x" });
+  assert.equal(worker.coercePayload("not json"), "not json");
+  assert.equal(worker.coercePayload("42"), "42"); // number, not an object -> untouched
+  assert.equal(worker.coercePayload("[1,2]"), "[1,2]"); // array -> not coerced
+  assert.equal(worker.coercePayload("null"), "null"); // null -> not coerced
+});
+
+test("dispatchAndWait: task-string com write parka na política de lease (não requeue)", async () => {
+  const cwd = setup();
+  await worker.dispatchAndWait(cwd, {
+    requestId: "dw-write",
+    to: "codex",
+    task: '{"prompt":"x","write":true}',
+    allowWrites: true,
+    runTurn: okTurn,
+    timeoutMs: 2000
+  });
+  const job = relay.findByRequestId(cwd, "dw-write");
+  assert.equal(job.leaseExpiryPolicy, "park");
+});
+
 test("heartbeat por timer mantém a posse viva durante turno silencioso (sweep não requeue)", async () => {
   const cwd = setup();
   const e = relay.enqueue(cwd, { requestId: "r1", to: "codex", payload: { prompt: "hi" } });

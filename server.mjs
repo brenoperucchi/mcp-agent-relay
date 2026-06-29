@@ -23,6 +23,7 @@ import {
   registerAgent,
   listAgents,
   inboxFor,
+  coercePayload,
   RelayStoreError
 } from "./lib/relay-jobs.mjs";
 import { ensureWorkerSession } from "./lib/worker-lifecycle.mjs";
@@ -243,14 +244,17 @@ function callTool(name, args = {}) {
       if (taskBytes > MAX_TASK_BYTES) {
         return toolError(`dispatch: 'task' excede o limite de ${MAX_TASK_BYTES} bytes`);
       }
+      // Coerce a stringified-JSON task to its object BEFORE deriving write-policy, so a write
+      // job sent as a string still parks on lease expiry (never auto-reruns a side effect).
+      const task = coercePayload(args.task);
       const out = enqueue(CWD, {
         requestId: args.request_id,
         to: args.to,
         from: AGENT_ID, // server-injected identity; never trusted from args
-        payload: args.task,
+        payload: task,
         ttlMs: args.ttl_ms ?? null,
         // A write job whose lease expires must PARK (needs_recovery), never auto-rerun.
-        leaseExpiryPolicy: args.task?.write === true ? "park" : "requeue"
+        leaseExpiryPolicy: task?.write === true ? "park" : "requeue"
       });
       scheduleNotify(); // same-process write: nudge subscribers of this inbox
       maybeAutoSpawnWorker(args.to); // gated; fire-and-forget; only for worker agents
