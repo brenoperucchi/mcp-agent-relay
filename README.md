@@ -98,7 +98,7 @@ The `mcpServers` key (`agentrelay`) is what Claude Code namespaces the tools by 
 
 > **Bare vs. plugin install change the names.** Installed as a *plugin*, the same server is
 > namespaced by the plugin: tools become `mcp__plugin_mcp-agent-relay_agentrelay__dispatch` /
-> `…__poll`, and the channel loads with `plugin:mcp-agent-relay` (not `server:agentrelay`). The
+> `…__poll`, and the channel loads with `plugin:mcp-agent-relay@mcp-agent-relay` (not `server:agentrelay`). The
 > `<channel source="agentrelay">` tag keeps the bare key either way.
 
 No build step, no runtime dependencies — Node ≥ 18.18 and the standard library only.
@@ -142,7 +142,7 @@ To have a *running* Claude session woken when a job it dispatched finishes:
 
 ```bash
 # plugin install:
-RELAY_AGENT=claude-main claude --dangerously-load-development-channels plugin:mcp-agent-relay
+RELAY_AGENT=claude-main claude --dangerously-load-development-channels plugin:mcp-agent-relay@mcp-agent-relay
 # bare `claude mcp add agentrelay` install instead:
 RELAY_AGENT=claude-main claude --dangerously-load-development-channels server:agentrelay
 # or just: bin/claude-relay   (wraps the plugin flag + sets RELAY_AGENT and worker auto-spawn)
