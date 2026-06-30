@@ -12,10 +12,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { drainOnce, runWorkerLoop } from "./lib/relay-worker.mjs";
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     agent: "codex",
     once: false,
@@ -105,7 +106,17 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`[relay-worker] ${err?.stack || err}\n`);
-  process.exit(1);
-});
+const isEntrypoint = (() => {
+  try {
+    return process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+  } catch {
+    return false;
+  }
+})();
+
+if (isEntrypoint) {
+  main().catch((err) => {
+    process.stderr.write(`[relay-worker] ${err?.stack || err}\n`);
+    process.exit(1);
+  });
+}
