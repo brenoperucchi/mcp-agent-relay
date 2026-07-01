@@ -15,6 +15,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 
 import { resolveStateDir } from "./lib/store-paths.mjs";
 import {
@@ -52,6 +53,32 @@ const AGENT_ID = process.env.RELAY_AGENT || null;
 const CHANNEL_ENABLED = Boolean(AGENT_ID);
 const POLL_MS = Number(process.env.RELAY_MCP_POLL_MS) || 2000;
 const CHANNEL_TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "expired", "needs_recovery"]);
+
+// dispatch_wait: synchronous dispatch that BLOCKS (polling the store) until the job
+// reaches a terminal state or the timeout elapses. The server never runs the turn — it
+// only observes; the auto-spawned worker executes. Keeps the async `dispatch` intact.
+const WAIT_TIMEOUT_MS = Number(process.env.RELAY_MCP_WAIT_TIMEOUT_MS) || 120_000;
+const WAIT_POLL_MS = Math.max(100, Number(process.env.RELAY_MCP_WAIT_POLL_MS) || 500);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Fired by the fs.watch/mtime-poll machinery (below, near startWatching) on every store
+// change. dispatch_wait listens on it to wake near-instantly instead of waiting out its
+// own poll interval — WAIT_POLL_MS remains the fallback for a missed/unavailable watch.
+const storeChanged = new EventEmitter();
+storeChanged.setMaxListeners(0); // many concurrent dispatch_wait calls may listen at once
+
+function waitForStoreChangeOrTimeout(ms) {
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      storeChanged.off("change", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    timer.unref?.();
+    storeChanged.once("change", finish);
+  });
+}
 
 // Auto-spawn a worker daemon on dispatch so jobs execute without `node worker.mjs`.
 // OFF by default (so library use and the test suite spawn nothing); the plugin's .mcp.json
@@ -206,6 +233,24 @@ const TOOLS = [
     }
   },
   {
+    name: "dispatch_wait",
+    description:
+      "Enqueue a job and BLOCK until it reaches a terminal state or timeout_ms elapses (default " +
+      `${WAIT_TIMEOUT_MS}ms). Use when you need the result inline instead of polling manually. ` +
+      "Idempotent by request_id. The job still executes via the normal worker, not inline.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Target agent id" },
+        task: { description: "Opaque task payload (any JSON)" },
+        request_id: { type: "string", description: "Idempotency key" },
+        ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" },
+        timeout_ms: { type: "number", description: "Max time to wait for a terminal state, in ms (> 0)" }
+      },
+      required: ["to", "task", "request_id"]
+    }
+  },
+  {
     name: "poll",
     description: "Get the current state and (if finished) the result of a job by job_id.",
     inputSchema: {
@@ -216,6 +261,99 @@ const TOOLS = [
   }
 ];
 
+// Shared validation + enqueue for `dispatch` and `dispatch_wait`. Returns { error }
+// (a human message, tool name prepended by the caller) or { out } (the enqueue result).
+function enqueueFromArgs(args) {
+  if (!isValidId(args.to)) {
+    return { error: "'to' deve ser uma string não-vazia (<= 1KB)" };
+  }
+  if (!isValidId(args.request_id)) {
+    return { error: "'request_id' deve ser uma string não-vazia (<= 1KB)" };
+  }
+  if (args.task === undefined || args.task === null) {
+    return { error: "'task' é obrigatório" };
+  }
+  if (
+    args.ttl_ms !== undefined &&
+    (typeof args.ttl_ms !== "number" || !Number.isFinite(args.ttl_ms) || args.ttl_ms < 0)
+  ) {
+    return { error: "'ttl_ms' deve ser um número >= 0" };
+  }
+  const taskBytes = Buffer.byteLength(JSON.stringify(args.task));
+  if (taskBytes > MAX_TASK_BYTES) {
+    return { error: `'task' excede o limite de ${MAX_TASK_BYTES} bytes` };
+  }
+  // Coerce a stringified-JSON task to its object BEFORE deriving write-policy, so a write
+  // job sent as a string still parks on lease expiry (never auto-reruns a side effect).
+  const task = coercePayload(args.task);
+  const out = enqueue(CWD, {
+    requestId: args.request_id,
+    to: args.to,
+    from: AGENT_ID, // server-injected identity; never trusted from args
+    payload: task,
+    ttlMs: args.ttl_ms ?? null,
+    // A write job whose lease expires must PARK (needs_recovery), never auto-rerun.
+    leaseExpiryPolicy: task?.write === true ? "park" : "requeue"
+  });
+  return { out };
+}
+
+// Synchronous dispatch: enqueue, then poll the store until the job is terminal or the
+// timeout elapses. The auto-spawned worker does the execution — the server only observes.
+async function dispatchWaitTool(args) {
+  let timeoutMs = WAIT_TIMEOUT_MS;
+  if (args.timeout_ms !== undefined) {
+    if (typeof args.timeout_ms !== "number" || !Number.isFinite(args.timeout_ms) || args.timeout_ms <= 0) {
+      return toolError("dispatch_wait: 'timeout_ms' deve ser um número > 0");
+    }
+    timeoutMs = args.timeout_ms;
+  }
+  const { error, out } = enqueueFromArgs(args);
+  if (error) {
+    return toolError(`dispatch_wait: ${error}`);
+  }
+  scheduleNotify();
+  maybeAutoSpawnWorker(args.to);
+
+  const summarize = (job, timedOut) =>
+    toolResult({
+      job_id: out.jobId,
+      deduped: out.deduped,
+      state: job.relayState,
+      result: job.result,
+      error: job.errorMessage,
+      attempts: job.attempts,
+      timed_out: timedOut
+    });
+
+  // Ensure the fs.watch/mtime-poll machinery is live so a worker completing this job
+  // wakes us near-instantly (via storeChanged) instead of waiting out WAIT_POLL_MS.
+  // activeWaiters keeps it alive for us without stealing it from a subscription/channel
+  // that already needs it (and without tearing theirs down when we're done).
+  startWatching();
+  activeWaiters++;
+  try {
+    // Check first so a fast (or already deduped-terminal) job returns without waiting at all.
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const job = getJob(CWD, out.jobId) || out.job;
+      if (CHANNEL_TERMINAL_STATES.has(job.relayState)) {
+        return summarize(job, false);
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        return summarize(job, true);
+      }
+      // WAIT_POLL_MS is the fallback ceiling for a missed/unavailable watch — the common
+      // case resolves as soon as storeChanged fires, well before this timer.
+      await waitForStoreChangeOrTimeout(Math.min(WAIT_POLL_MS, Math.max(1, remainingMs)));
+    }
+  } finally {
+    activeWaiters--;
+    stopWatchingIfIdle();
+  }
+}
+
 function callTool(name, args = {}) {
   switch (name) {
     case "register_agent": {
@@ -225,41 +363,17 @@ function callTool(name, args = {}) {
       return toolResult(registerAgent(CWD, args.agent_id));
     }
     case "dispatch": {
-      if (!isValidId(args.to)) {
-        return toolError("dispatch: 'to' deve ser uma string não-vazia (<= 1KB)");
+      const { error, out } = enqueueFromArgs(args);
+      if (error) {
+        return toolError(`dispatch: ${error}`);
       }
-      if (!isValidId(args.request_id)) {
-        return toolError("dispatch: 'request_id' deve ser uma string não-vazia (<= 1KB)");
-      }
-      if (args.task === undefined || args.task === null) {
-        return toolError("dispatch: 'task' é obrigatório");
-      }
-      if (
-        args.ttl_ms !== undefined &&
-        (typeof args.ttl_ms !== "number" || !Number.isFinite(args.ttl_ms) || args.ttl_ms < 0)
-      ) {
-        return toolError("dispatch: 'ttl_ms' deve ser um número >= 0");
-      }
-      const taskBytes = Buffer.byteLength(JSON.stringify(args.task));
-      if (taskBytes > MAX_TASK_BYTES) {
-        return toolError(`dispatch: 'task' excede o limite de ${MAX_TASK_BYTES} bytes`);
-      }
-      // Coerce a stringified-JSON task to its object BEFORE deriving write-policy, so a write
-      // job sent as a string still parks on lease expiry (never auto-reruns a side effect).
-      const task = coercePayload(args.task);
-      const out = enqueue(CWD, {
-        requestId: args.request_id,
-        to: args.to,
-        from: AGENT_ID, // server-injected identity; never trusted from args
-        payload: task,
-        ttlMs: args.ttl_ms ?? null,
-        // A write job whose lease expires must PARK (needs_recovery), never auto-rerun.
-        leaseExpiryPolicy: task?.write === true ? "park" : "requeue"
-      });
       scheduleNotify(); // same-process write: nudge subscribers of this inbox
       maybeAutoSpawnWorker(args.to); // gated; fire-and-forget; only for worker agents
       return toolResult({ job_id: out.jobId, deduped: out.deduped, state: out.job.relayState });
     }
+    case "dispatch_wait":
+      // Returns a Promise; the tools/call handler awaits it without blocking other requests.
+      return dispatchWaitTool(args);
     case "poll": {
       if (!isValidId(args.job_id)) {
         return toolError("poll: 'job_id' deve ser uma string não-vazia (<= 1KB)");
@@ -349,6 +463,7 @@ let watcher = null;
 let pollTimer = null;
 let notifyTimer = null;
 let pendingNotify = false;
+let activeWaiters = 0; // dispatch_wait calls currently blocked on the watch (see stopWatchingIfIdle)
 
 function relayFilePath() {
   return path.join(resolveStateDir(CWD), "relay-state.json");
@@ -479,9 +594,13 @@ function startWatching() {
   } catch {
     // best-effort
   }
-  // fs.watch is a best-effort wake-up only; it can miss/duplicate events.
+  // fs.watch is a best-effort wake-up only; it can miss/duplicate events. storeChanged
+  // is emitted alongside scheduleNotify so dispatch_wait can react immediately too.
   try {
-    watcher = fs.watch(dir, () => scheduleNotify());
+    watcher = fs.watch(dir, () => {
+      scheduleNotify();
+      storeChanged.emit("change");
+    });
     watcher.unref?.();
   } catch (err) {
     log("fs.watch indisponível, usando só polling:", err.message);
@@ -494,6 +613,7 @@ function startWatching() {
       if (m !== lastMtime) {
         lastMtime = m;
         scheduleNotify();
+        storeChanged.emit("change");
       }
     } catch {
       // file may not exist yet
@@ -506,8 +626,8 @@ function startWatching() {
 }
 
 function stopWatchingIfIdle() {
-  if (subscriptions.size > 0 || CHANNEL_ENABLED) {
-    return; // keep watching while the channel needs to detect external changes
+  if (subscriptions.size > 0 || CHANNEL_ENABLED || activeWaiters > 0) {
+    return; // keep watching while the channel/dispatch_wait needs to detect changes
   }
   try {
     watcher?.close();
@@ -556,6 +676,23 @@ function handleMessage(msg) {
         const result = callTool(name, params?.arguments ?? {});
         if (result == null) {
           return respondError(id, JSON_RPC.INVALID_PARAMS, `Unknown tool: ${name}`);
+        }
+        if (result && typeof result.then === "function") {
+          // Async tool (dispatch_wait): resolve later without blocking the read loop —
+          // other JSON-RPC messages on stdin keep being processed while this awaits.
+          result.then(
+            (value) => respond(id, value),
+            (err) => {
+              if (err instanceof RelayStoreError) {
+                return respondError(id, JSON_RPC.INTERNAL_ERROR, `relay store error: ${err.message}`, {
+                  code: err.code
+                });
+              }
+              log("erro interno (tools/call assíncrono):", err?.stack || err);
+              return respondError(id, JSON_RPC.INTERNAL_ERROR, `internal error: ${err?.message ?? String(err)}`);
+            }
+          );
+          return;
         }
         return respond(id, result);
       }

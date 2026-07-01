@@ -147,3 +147,29 @@ test("autospawn ON for an allow-listed agent: a worker daemon appears", async ()
     killStateWorkers(env);
   }
 });
+
+test("autospawn ON for an allow-listed agent via dispatch_wait: a worker daemon appears", async () => {
+  const env = makeEnv({ RELAY_WORKER_AUTOSPAWN: "1", RELAY_WORKER_AGENTS: "codex" });
+  const server = startServer(env);
+  try {
+    await server.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+    server.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    // payload WITHOUT a `prompt`: a real worker fails it immediately, so no codex is ever run.
+    // Fire-and-forget: dispatch_wait blocks until timeout_ms, but this test only cares that
+    // the enqueue triggered autospawn, not the eventual (timed-out) result.
+    server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { note: "no prompt" }, request_id: "g4", timeout_ms: 300 }
+    });
+    let files = [];
+    for (let i = 0; i < 80; i++) {
+      files = workerStateFiles(env);
+      if (files.length) break;
+      await delay(100);
+    }
+    assert.deepEqual(files, ["worker-codex.json"], "dispatch_wait to an allow-listed agent spawns one worker daemon");
+  } finally {
+    server.stop();
+    killStateWorkers(env);
+  }
+});

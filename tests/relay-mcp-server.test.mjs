@@ -172,13 +172,13 @@ test("initialize com versão não suportada responde a mais recente (não erro)"
   }
 });
 
-test("tools/list expõe register_agent, dispatch e poll", async () => {
+test("tools/list expõe register_agent, dispatch, dispatch_wait e poll", async () => {
   const server = startServer(makeEnv());
   try {
     await initialize(server);
     const res = await server.request("tools/list", {});
     const names = res.result.tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ["dispatch", "poll", "register_agent"]);
+    assert.deepEqual(names, ["dispatch", "dispatch_wait", "poll", "register_agent"]);
     for (const t of res.result.tools) {
       assert.ok(t.inputSchema && t.inputSchema.type === "object");
     }
@@ -253,6 +253,167 @@ test("dispatch deduplica por request_id", async () => {
     );
     assert.equal(b.job_id, a.job_id);
     assert.equal(b.deduped, true);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait retorna resultado quando o job completa antes do timeout", async () => {
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "50" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const pending = server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { prompt: "x" }, request_id: "w1", timeout_ms: 5000 }
+    });
+    // Wait (bounded) for the enqueue to land in the store before completing it out-of-band,
+    // simulating the auto-spawned worker (never the server itself running the turn).
+    let job = null;
+    for (let i = 0; i < 50 && !job; i++) {
+      job = relayOp(env, (cwd) => relay.findByRequestId(cwd, "w1"));
+      if (!job) await sleep(20);
+    }
+    assert.ok(job, "job deveria estar no store antes do teto de espera");
+    const jobId = job.id;
+    relayOp(env, (cwd) => {
+      const c = relay.claim(cwd, jobId, "w", 10000);
+      relay.complete(cwd, jobId, c.claimToken, { ok: 1 });
+    });
+    const res = await pending;
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.job_id, jobId);
+    assert.equal(payload.state, "completed");
+    assert.deepEqual(payload.result, { ok: 1 });
+    assert.equal(payload.timed_out, false);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait acorda via fs.watch quase instantaneamente, sem esperar o WAIT_POLL_MS cheio", async () => {
+  // Fallback de poll propositalmente lento: se a resposta vier bem mais rápido que isso,
+  // é porque o watch (não o timer de fallback) acordou o dispatch_wait.
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "5000" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const pending = server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { prompt: "x" }, request_id: "watch1", timeout_ms: 10000 }
+    });
+    let job = null;
+    for (let i = 0; i < 50 && !job; i++) {
+      job = relayOp(env, (cwd) => relay.findByRequestId(cwd, "watch1"));
+      if (!job) await sleep(20);
+    }
+    assert.ok(job, "job deveria estar no store antes do teto de espera");
+    const completedAt = Date.now();
+    relayOp(env, (cwd) => {
+      const c = relay.claim(cwd, job.id, "w", 10000);
+      relay.complete(cwd, job.id, c.claimToken, { ok: 1 });
+    });
+    const res = await pending;
+    const elapsedMs = Date.now() - completedAt;
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.state, "completed");
+    assert.ok(elapsedMs < 2000, `deveria acordar via fs.watch bem antes do fallback de 5s (levou ${elapsedMs}ms)`);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait retorna timed_out=true quando o timeout expira antes da conclusão", async () => {
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "30" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const res = await server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { prompt: "x" }, request_id: "w2", timeout_ms: 150 }
+    });
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.state, "queued"); // ninguém consumiu o job
+    assert.equal(payload.timed_out, true);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait deduplica por request_id (mesmo job já enfileirado por dispatch)", async () => {
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "30" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const disp = JSON.parse(
+      (await server.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { n: 1 }, request_id: "dupw" }
+      })).result.content[0].text
+    );
+    const res = await server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { n: 2 }, request_id: "dupw", timeout_ms: 150 }
+    });
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.job_id, disp.job_id);
+    assert.equal(payload.deduped, true);
+    assert.equal(payload.timed_out, true); // job original nunca foi completado
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait: timeout_ms inválido (<= 0) vira tool error", async () => {
+  const server = startServer(makeEnv());
+  try {
+    await initialize(server);
+    const res = await server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { n: 1 }, request_id: "w3", timeout_ms: 0 }
+    });
+    assert.equal(res.result.isError, true);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait: argumento faltando vira tool error (isError), não crash", async () => {
+  const server = startServer(makeEnv());
+  try {
+    await initialize(server);
+    const res = await server.request("tools/call", { name: "dispatch_wait", arguments: { to: "codex" } });
+    assert.equal(res.result.isError, true);
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait em andamento não bloqueia outras mensagens (ping resolve antes do timeout)", async () => {
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "50" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    let pendingSettled = false;
+    const pending = server
+      .request("tools/call", {
+        name: "dispatch_wait",
+        arguments: { to: "codex", task: { n: 1 }, request_id: "block1", timeout_ms: 2000 }
+      })
+      .then((res) => {
+        pendingSettled = true;
+        return res;
+      });
+    const ping = await server.request("ping", {});
+    assert.deepEqual(ping.result, {});
+    // Real proof of non-blocking: ping resolved while dispatch_wait is still well
+    // short of its 2s timeout. A synchronous/blocking wait (e.g. Atomics.wait, the
+    // pattern bin/relay-stop-hook.mjs uses for hooks) would starve stdin processing
+    // until dispatch_wait itself settled first, making this assertion fail.
+    assert.equal(pendingSettled, false, "ping deveria resolver antes do dispatch_wait, provando que o loop não bloqueou");
+    const res = await pending; // drain: acaba estourando o timeout (ninguém completa o job)
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.timed_out, true);
   } finally {
     server.stop();
   }
