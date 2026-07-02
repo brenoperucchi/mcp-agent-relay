@@ -4,7 +4,7 @@
 session is *woken* — via a [channel](#the-channel-no-more-tmux) — the moment a job finishes.
 No `tmux send-keys`, no file-watching daemon, no point-to-point socket to keep alive.
 
-> Status: **v0.1 — research preview.** The store, MCP facade, and worker are covered by 86
+> Status: **v0.1 — research preview.** The store, MCP facade, and worker are covered by 159
 > tests. The "wake a running session" channel rides on a Claude Code research-preview feature
 > (see [caveats](#requirements--caveats)).
 
@@ -125,6 +125,22 @@ No build step, no runtime dependencies — Node ≥ 18.18 and the standard libra
 // → { "found": true, "state": "completed", "result": { … }, "attempts": 1 }
 ```
 
+### Dispatch and wait (the synchronous shortcut)
+
+`dispatch_wait` enqueues (idempotent by `request_id`, same as `dispatch`) and **blocks the tool
+call** until the job reaches a terminal state or `timeout_ms` elapses — no manual poll loop. It
+wakes near-instantly via `fs.watch` on the store file rather than sleeping the full poll interval:
+
+```jsonc
+// tool: dispatch_wait
+{ "to": "codex", "task": { "prompt": "review the diff" }, "request_id": "req-1", "timeout_ms": 120000 }
+// → { "job_id": "relay-…", "timed_out": false, "state": "completed", "result": { … } }
+```
+
+If `timeout_ms` elapses first, it returns `{ timed_out: true, state: "queued" | "running", … }` —
+the job keeps running server-side; the channel or [Stop hook](#the-stop-hook-wake-up-without-the-channel-flag)
+picks up the eventual completion instead of you having to poll for it by hand.
+
 ### Run a worker (the execution side)
 
 The worker claims queued jobs and runs them. The default executor shells out to `codex exec`:
@@ -166,6 +182,17 @@ agentrelay `poll` tool.
 **Injection-safe:** the channel content is a minimal envelope (`job_id`, `state`) telling Claude
 to `poll` for the result. The untrusted job payload is **never** placed in the channel content.
 
+**Session-scoped, not just agent-scoped.** `RELAY_AGENT` is a *logical* identity shared by every
+Claude Code session in the same project (e.g. three tabs all set to `claude-main`) — matching on
+`from === RELAY_AGENT` alone means a sibling session gets woken about a job *another* sibling
+dispatched. When `CLAUDE_CODE_SESSION_ID` is present in the server's environment (set by Claude
+Code itself), `lib/relay-owned.mjs` narrows terminal events to jobs *this specific session*
+dispatched, and skips re-pushing a transition already delivered inline by `dispatch_wait`. No
+session id → falls back to the plain `from === RELAY_AGENT` behavior described above (never
+notifies *less* than that). This is the same mechanism and the same data as the
+[Stop hook](#the-stop-hook-wake-up-without-the-channel-flag) below — the two never disagree about
+what counts as a fresh event.
+
 ### The Stop hook (wake-up without the channel flag)
 
 The channel is the only *push* path Claude Code exposes, but it needs
@@ -202,10 +229,14 @@ first stop isn't flooded with old jobs; `Stop` surfaces new transitions — full
 
 Requires `RELAY_AGENT` in the environment (the session identity) — without it the hook is a
 silent no-op, exactly like the channel with no agent id. Event parity with the channel is exact:
-a terminal job with `from === RELAY_AGENT`, or a queued job with `to === RELAY_AGENT`. Optional
-knobs: `RELAY_HOOK_WAIT_MS>0` makes a stop **long-poll** (bounded) for an in-flight dispatch to
-finish instead of settling immediately; `RELAY_HOOK_POLL_MS` tunes the poll interval. The hook
-**fails open** — any internal error allows the stop, never wedging the session.
+a terminal job with `from === RELAY_AGENT`, or a queued job with `to === RELAY_AGENT` — **and the
+same session-scoped narrowing described above**, keyed by `CLAUDE_CODE_SESSION_ID`. Two sibling
+sessions under the same `RELAY_AGENT` don't wake each other, and a job already delivered inline by
+`dispatch_wait` isn't surfaced again by the next `Stop`. Optional knobs: `RELAY_HOOK_WAIT_MS>0`
+makes a stop **long-poll** (bounded) for an in-flight dispatch to finish instead of settling
+immediately (the session-scoped data is re-read from disk on every poll tick, so a mid-wait
+delivery from another path is picked up, not missed); `RELAY_HOOK_POLL_MS` tunes the poll
+interval. The hook **fails open** — any internal error allows the stop, never wedging the session.
 
 > **The hook must resolve the same store as the MCP server.** Both derive the state dir from
 > `RELAY_DATA_DIR` (or `$CLAUDE_PLUGIN_DATA/state`, then `~/.mcp-agent-relay/state`) plus the
@@ -215,10 +246,15 @@ finish instead of settling immediately; `RELAY_HOOK_POLL_MS` tunes the poll inte
 > unexpanded `${RELAY_DATA_DIR}` — that lands the store in a literal `${RELAY_DATA_DIR}/` folder
 > under your cwd.)
 
-| Path | Dialog | Inbound on recent builds | Install |
-| --- | --- | --- | --- |
-| Channel (`--dangerously-load-development-channels`) | yes | broken (#71792) | `bin/claude-relay` |
-| **Stop hook** | **no** | **works** | `claude mcp add` / plugin + 2 hook lines |
+| Path | Dialog | Inbound on recent builds | Session isolation | Install |
+| --- | --- | --- | --- | --- |
+| Channel (`--dangerously-load-development-channels`) | yes | broken (#71792) | yes (with `CLAUDE_CODE_SESSION_ID`) | `bin/claude-relay` |
+| **Stop hook** | **no** | **works** | yes (same mechanism) | `claude mcp add` / plugin + 2 hook lines |
+
+Session isolation is a wash between the two — it doesn't change the recommendation below. The
+channel's problem was never cross-talk between sibling sessions (that's fixed identically on both
+paths); it's the dialog and the upstream breakage. Fix the session-identity data and the channel is
+exactly as safe as the hook, just still gated behind a flag and a bug that isn't ours to fix.
 
 ---
 
@@ -271,7 +307,7 @@ main working tree — a real behavior difference from running the turn directly 
 ## Development
 
 ```bash
-node --test        # 86 tests: store, facade + channel, worker
+node --test        # 159 tests: store, facade + channel, hook, worker, worktree isolation
 ```
 
 ## License
