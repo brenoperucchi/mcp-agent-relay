@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -14,6 +14,7 @@ import {
   hasInFlightFromAgent,
   buildReason
 } from "../lib/relay-hook.mjs";
+import { recordOwned } from "../lib/relay-owned.mjs";
 import * as relay from "../lib/relay-jobs.mjs";
 import { resolveStateDir } from "../lib/store-paths.mjs";
 
@@ -94,6 +95,44 @@ test("hasInFlightFromAgent: true only for my non-terminal dispatches", () => {
   assert.equal(hasInFlightFromAgent([j({ from: "other", relayState: "running" })], "me"), false);
 });
 
+// --- ownedIds (session-scoped filtering) ---------------------------------
+
+test("channelKeys: ownedIds without the job id excludes a from-side terminal candidate (cross-talk)", () => {
+  const owned = new Set(["other-job"]);
+  const keys = channelKeys(j({ id: "a", from: "me", relayState: "completed", terminalAtMs: 9 }), "me", owned);
+  assert.equal(keys.length, 0);
+});
+
+test("channelKeys: ownedIds with the bare job id still surfaces it (not yet delivered)", () => {
+  const owned = new Set(["a"]);
+  const keys = channelKeys(j({ id: "a", from: "me", relayState: "completed", terminalAtMs: 9 }), "me", owned);
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].key, "a:completed:9");
+});
+
+test("channelKeys: ownedIds with the id AND the terminal key excludes it (same-session dedup)", () => {
+  const owned = new Set(["a", "a:completed:9"]);
+  const keys = channelKeys(j({ id: "a", from: "me", relayState: "completed", terminalAtMs: 9 }), "me", owned);
+  assert.equal(keys.length, 0);
+});
+
+test("channelKeys: inbox events are unaffected by ownedIds (receive side, not dispatch side)", () => {
+  const owned = new Set(); // would exclude everything if (wrongly) applied to inbox
+  const keys = channelKeys(j({ id: "b", to: "me", relayState: "queued", enqueuedAtMs: 4 }), "me", owned);
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].kind, "inbox");
+});
+
+test("hasInFlightFromAgent: ownedIds without the job id returns false (cross-talk in long-poll)", () => {
+  const owned = new Set(["other-job"]);
+  assert.equal(hasInFlightFromAgent([j({ id: "a", from: "me", relayState: "running" })], "me", owned), false);
+});
+
+test("hasInFlightFromAgent: ownedIds with the job id returns true", () => {
+  const owned = new Set(["a"]);
+  assert.equal(hasInFlightFromAgent([j({ id: "a", from: "me", relayState: "running" })], "me", owned), true);
+});
+
 test("collectKeys spans the whole list", () => {
   const jobs = [
     j({ id: "a", from: "me", relayState: "completed", terminalAtMs: 9 }),
@@ -116,10 +155,14 @@ test("buildReason is notification-only and lists each job", () => {
 // --- executable hook (stdin/stdout contract) -----------------------------
 
 function runHook(input, env = {}) {
+  // Blank CLAUDE_CODE_SESSION_ID by default: it's ambient in the real dev session
+  // running this test suite, and would otherwise leak in and silently override the
+  // per-test `session_id` payload used to key the seen-set/owned-file. Tests that
+  // specifically exercise env-vs-payload resolution set it explicitly via `env`.
   const out = execFileSync("node", [HOOK_BIN], {
     input: JSON.stringify(input),
     encoding: "utf8",
-    env: { ...process.env, ...env }
+    env: { ...process.env, CLAUDE_CODE_SESSION_ID: "", ...env }
   });
   return out.trim();
 }
@@ -178,4 +221,79 @@ test("hook: seen-set is persisted per session id", () => {
   runHook({ hook_event_name: "SessionStart", cwd, session_id: "persist/me" }, { RELAY_AGENT: "me" });
   const f = path.join(resolveStateDir(cwd), "hook-seen-persist-me.json");
   assert.ok(fs.existsSync(f), "seen-set file written with sanitized name");
+});
+
+// --- session isolation (owned-file) ---------------------------------------
+
+test("hook: two sibling sessions under the same RELAY_AGENT — only the dispatching session is notified", () => {
+  const { cwd } = setup();
+  const env = { RELAY_AGENT: "me" };
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "sibA" }, env);
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "sibB" }, env);
+
+  const e = relay.enqueue(cwd, { requestId: "sib1", from: "me", to: "codex" });
+  const c = relay.claim(cwd, e.jobId, "w1");
+  relay.complete(cwd, e.jobId, c.claimToken, { ok: true });
+
+  // server.mjs would have recorded this at dispatch time (enqueueFromArgs). Simulate
+  // it here: A dispatched this job; B has an owned-file of its own from something
+  // unrelated (so its whitelist is non-null and genuinely excludes A's job).
+  recordOwned(cwd, "sibA", [e.jobId]);
+  recordOwned(cwd, "sibB", ["some-other-job-b-dispatched"]);
+
+  const outB = runHook({ hook_event_name: "Stop", cwd, session_id: "sibB" }, env);
+  assert.equal(outB, "", "sibling B never dispatched this job, so it must stay silent");
+
+  const outA = runHook({ hook_event_name: "Stop", cwd, session_id: "sibA" }, env);
+  const parsed = JSON.parse(outA);
+  assert.equal(parsed.decision, "block");
+  assert.match(parsed.reason, new RegExp(`Job ${e.jobId} that you dispatched`));
+});
+
+test("hook: no owned-file for this session at all → falls back to today's agentId-only behavior", () => {
+  const { cwd } = setup();
+  const env = { RELAY_AGENT: "me" };
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "nofile" }, env);
+
+  const e = relay.enqueue(cwd, { requestId: "nofile1", from: "me", to: "codex" });
+  const c = relay.claim(cwd, e.jobId, "w1");
+  relay.complete(cwd, e.jobId, c.claimToken, { ok: true });
+
+  // No recordOwned() call at all — owned-nofile.json is never created, so the hook
+  // must never notify LESS than it did before session-awareness existed.
+  const out = runHook({ hook_event_name: "Stop", cwd, session_id: "nofile" }, env);
+  const parsed = JSON.parse(out);
+  assert.equal(parsed.decision, "block");
+});
+
+test("hook: session restart (new session_id) never learns it owns a job dispatched under the old id — accepted limitation", () => {
+  const { cwd } = setup();
+  const env = { RELAY_AGENT: "me" };
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "old" }, env);
+
+  const e = relay.enqueue(cwd, { requestId: "restart1", from: "me", to: "codex" });
+  recordOwned(cwd, "old", [e.jobId]); // dispatched under the OLD session id
+  const c = relay.claim(cwd, e.jobId, "w1");
+  relay.complete(cwd, e.jobId, c.claimToken, { ok: true });
+
+  // The session restarts under a NEW session id that already has its own owned-file
+  // (from dispatching something unrelated), so the whitelist genuinely applies.
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "new" }, env);
+  recordOwned(cwd, "new", ["unrelated-new-job"]);
+
+  const out = runHook({ hook_event_name: "Stop", cwd, session_id: "new" }, env);
+  assert.equal(out, "", "accepted limitation: the new session id never learns it owns the old job");
+});
+
+test("hook: session id mismatch between env and payload is logged to stderr, env wins", () => {
+  const { cwd } = setup();
+  const env = { RELAY_AGENT: "me", CLAUDE_CODE_SESSION_ID: "env-sess" };
+  runHook({ hook_event_name: "SessionStart", cwd, session_id: "payload-sess" }, env);
+
+  const res = spawnSync("node", [HOOK_BIN], {
+    input: JSON.stringify({ hook_event_name: "Stop", cwd, session_id: "payload-sess" }),
+    encoding: "utf8",
+    env: { ...process.env, ...env }
+  });
+  assert.match(res.stderr, /session id mismatch: env=env-sess payload=payload-sess — using env/);
 });

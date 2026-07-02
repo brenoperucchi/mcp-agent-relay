@@ -33,6 +33,7 @@ import path from "node:path";
 import { list } from "../lib/relay-jobs.mjs";
 import { resolveStateDir } from "../lib/store-paths.mjs";
 import { surface, seedKeys, hasInFlightFromAgent, buildReason } from "../lib/relay-hook.mjs";
+import { readOwned } from "../lib/relay-owned.mjs";
 
 const AGENT_ID = process.env.RELAY_AGENT || null;
 const WAIT_MS = Math.max(0, Number(process.env.RELAY_HOOK_WAIT_MS) || 0);
@@ -124,9 +125,25 @@ function main() {
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const file = seenFile(cwd, input.session_id);
 
+  // Canonical session identity for the owned-file: process.env.CLAUDE_CODE_SESSION_ID
+  // (the same source server.mjs uses when recording ownership) takes precedence over
+  // the hook payload's session_id. Both SHOULD be the same value — if they diverge,
+  // ownership lookups would silently miss, so log it instead of failing silently.
+  const envSessionId = process.env.CLAUDE_CODE_SESSION_ID || null;
+  const payloadSessionId = input.session_id || null;
+  if (envSessionId && payloadSessionId && envSessionId !== payloadSessionId) {
+    log(`session id mismatch: env=${envSessionId} payload=${payloadSessionId} — using env`);
+  }
+  const ownedSessionId = envSessionId || payloadSessionId;
+  // null when there's no session id at all, or no owned-file yet — every consumer
+  // below treats null as "no session data", falling back to today's agentId-only
+  // filtering (never notifies LESS than before this feature existed).
+  const loadOwnedIds = () => (ownedSessionId ? readOwned(cwd, ownedSessionId) : null);
+  const ownedIds = loadOwnedIds();
+
   // SessionStart: seed and exit. Everything already in the store is "old".
   if (event === "SessionStart") {
-    writeSeen(file, new Set(seedKeys(readJobs(cwd), AGENT_ID)));
+    writeSeen(file, new Set(seedKeys(readJobs(cwd), AGENT_ID, ownedIds)));
     allow();
   }
 
@@ -136,13 +153,13 @@ function main() {
     // No baseline (SessionStart not wired, or first run): seed-and-allow so we
     // never flood Claude with jobs that predate this session. Subsequent stops
     // then surface only genuinely new transitions.
-    writeSeen(file, new Set(seedKeys(readJobs(cwd), AGENT_ID)));
+    writeSeen(file, new Set(seedKeys(readJobs(cwd), AGENT_ID, ownedIds)));
     log("no seen-set baseline — seeded and allowing this stop (wire SessionStart for full coverage)");
     allow();
   }
 
   let jobs = readJobs(cwd);
-  let { fresh, nextSeen } = surface(jobs, AGENT_ID, seen);
+  let { fresh, nextSeen } = surface(jobs, AGENT_ID, seen, ownedIds);
 
   // Optional long-poll: if nothing surfaced yet but a dispatched job is still in
   // flight, wait for it (bounded by WAIT_MS) rather than letting the session
@@ -150,10 +167,15 @@ function main() {
   // stops cannot pin the session indefinitely.
   if (fresh.length === 0 && WAIT_MS > 0 && !input.stop_hook_active) {
     const deadline = Date.now() + WAIT_MS;
-    while (Date.now() < deadline && hasInFlightFromAgent(jobs, AGENT_ID)) {
+    // Reload ownedIds every iteration: another delivery path (dispatch_wait inline,
+    // or the MCP channel) can record a terminal exclusion key WHILE we sleep here,
+    // and a stale snapshot would miss it and duplicate the notification.
+    let currentOwnedIds = ownedIds;
+    while (Date.now() < deadline && hasInFlightFromAgent(jobs, AGENT_ID, currentOwnedIds)) {
       sleep(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
       jobs = readJobs(cwd);
-      ({ fresh, nextSeen } = surface(jobs, AGENT_ID, seen));
+      currentOwnedIds = loadOwnedIds();
+      ({ fresh, nextSeen } = surface(jobs, AGENT_ID, seen, currentOwnedIds));
       if (fresh.length > 0) break;
     }
   }

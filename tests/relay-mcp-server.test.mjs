@@ -3,11 +3,26 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { resolveStateDir } from "../lib/store-paths.mjs";
+import { readOwned } from "../lib/relay-owned.mjs";
 import * as relay from "../lib/relay-jobs.mjs";
+
+const HOOK_BIN = fileURLToPath(new URL("../bin/relay-stop-hook.mjs", import.meta.url));
+
+function runHook(input, env) {
+  // Blank CLAUDE_CODE_SESSION_ID by default for the same reason as tests/relay-hook.test.mjs:
+  // it's ambient in the real dev session running this suite and would otherwise leak in and
+  // silently override the per-test session identity.
+  const out = execFileSync("node", [HOOK_BIN], {
+    input: JSON.stringify(input),
+    encoding: "utf8",
+    env: { ...process.env, CLAUDE_CODE_SESSION_ID: "", ...env }
+  });
+  return out.trim();
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -54,7 +69,13 @@ function storeFileFor(env) {
 
 function startServer(env) {
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, ...env },
+    // Blank CLAUDE_CODE_SESSION_ID by default: it's ambient in the real dev session
+    // running this suite and would otherwise leak in and make ensureOwnedFile()
+    // create a real (empty) owned-file for it, silently turning on whitelist
+    // filtering for tests that inject jobs directly into the store and never
+    // dispatch through the MCP tools (so recordOwned() never runs for them).
+    // Tests that specifically exercise session isolation set it explicitly via `env`.
+    env: { ...process.env, CLAUDE_CODE_SESSION_ID: "", ...env },
     stdio: ["pipe", "pipe", "pipe"]
   });
   const messages = [];
@@ -416,6 +437,228 @@ test("dispatch_wait em andamento não bloqueia outras mensagens (ping resolve an
     assert.equal(payload.timed_out, true);
   } finally {
     server.stop();
+  }
+});
+
+test("dispatch_wait: entrega inline grava id nu (dispatch) e chave terminal (entrega) no owned-file da sessão", async () => {
+  const env = { ...makeEnv(), RELAY_MCP_WAIT_POLL_MS: "50", CLAUDE_CODE_SESSION_ID: "sess-owned-1" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const pending = server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { prompt: "x" }, request_id: "owned1", timeout_ms: 5000 }
+    });
+    let job = null;
+    for (let i = 0; i < 50 && !job; i++) {
+      job = relayOp(env, (cwd) => relay.findByRequestId(cwd, "owned1"));
+      if (!job) await sleep(20);
+    }
+    assert.ok(job, "job deveria estar no store antes do teto de espera");
+    relayOp(env, (cwd) => {
+      const c = relay.claim(cwd, job.id, "w", 10000);
+      relay.complete(cwd, job.id, c.claimToken, { ok: 1 });
+    });
+    const res = await pending;
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.timed_out, false);
+
+    const done = relayOp(env, (cwd) => relay.getJob(cwd, job.id));
+    const owned = relayOp(env, (cwd) => readOwned(cwd, "sess-owned-1"));
+    assert.ok(owned, "owned-file deveria existir");
+    assert.ok(owned.has(job.id), "id nu gravado no dispatch (whitelist)");
+    assert.ok(
+      owned.has(`${job.id}:${done.relayState}:${done.terminalAtMs}`),
+      "chave terminal completa gravada na entrega inline (exclusão)"
+    );
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch: dedup por request_id de uma segunda sessão também grava o id no owned-file dela (não fica órfã)", async () => {
+  const base = makeEnv();
+  const s1 = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "sess-dedup-1" });
+  const s2 = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "sess-dedup-2" });
+  try {
+    await initialize(s1);
+    await initialize(s2);
+    const a = JSON.parse(
+      (await s1.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { n: 1 }, request_id: "shared-req" }
+      })).result.content[0].text
+    );
+    const b = JSON.parse(
+      (await s2.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { n: 2 }, request_id: "shared-req" }
+      })).result.content[0].text
+    );
+    assert.equal(b.job_id, a.job_id);
+    assert.equal(b.deduped, true);
+
+    const owned1 = relayOp(base, (cwd) => readOwned(cwd, "sess-dedup-1"));
+    const owned2 = relayOp(base, (cwd) => readOwned(cwd, "sess-dedup-2"));
+    assert.ok(owned1?.has(a.job_id), "sessão que despachou originalmente possui o id");
+    assert.ok(owned2?.has(a.job_id), "segunda sessão (dedup) também possui o id — não fica órfã");
+  } finally {
+    s1.stop();
+    s2.stop();
+  }
+});
+
+test("owned-file: duas sessões mesmo RELAY_AGENT, session id diferente — só a que despachou tem o id", async () => {
+  const base = { ...makeEnv(), RELAY_AGENT: "alice" };
+  const a = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "sess-A" });
+  const b = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "sess-B" });
+  try {
+    await initialize(a);
+    await initialize(b);
+    const disp = JSON.parse(
+      (await a.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { prompt: "x" }, request_id: "r-session-split" }
+      })).result.content[0].text
+    );
+    const ownedA = relayOp(base, (cwd) => readOwned(cwd, "sess-A"));
+    const ownedB = relayOp(base, (cwd) => readOwned(cwd, "sess-B"));
+    assert.ok(ownedA?.has(disp.job_id), "sessão A despachou e deve possuir o id");
+    assert.ok(!ownedB?.has(disp.job_id), "sessão B não despachou e não deve possuir o id");
+  } finally {
+    a.stop();
+    b.stop();
+  }
+});
+
+test("channel: sessões irmãs sob o mesmo RELAY_AGENT — B (com owned-file próprio) não recebe o job de A", async () => {
+  const base = makeEnv();
+  const a = startServer({ ...base, RELAY_AGENT: "alice", RELAY_MCP_POLL_MS: "120", CLAUDE_CODE_SESSION_ID: "sib-A" });
+  const b = startServer({ ...base, RELAY_AGENT: "alice", RELAY_MCP_POLL_MS: "120", CLAUDE_CODE_SESSION_ID: "sib-B" });
+  try {
+    await initialize(a);
+    await initialize(b);
+    // B needs its own (non-empty) owned-file for the whitelist to genuinely apply —
+    // dispatch something of its own first, exactly like the real production scenario
+    // where every sibling session is actively using the relay.
+    await b.request("tools/call", {
+      name: "dispatch",
+      arguments: { to: "codex", task: { prompt: "unrelated" }, request_id: "b-own-job" }
+    });
+    const disp = JSON.parse(
+      (await a.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { prompt: "x" }, request_id: "r-sibling" }
+      })).result.content[0].text
+    );
+    relayOp(base, (cwd) => {
+      const c = relay.claim(cwd, disp.job_id, "w", 10000);
+      relay.complete(cwd, disp.job_id, c.claimToken, { ok: 1 });
+    });
+    const note = await a.waitFor((m) => m.method === "notifications/claude/channel" && m.params?.meta?.job_id === disp.job_id);
+    assert.equal(note.params.meta.state, "completed");
+    await assert.rejects(
+      b.waitFor((m) => m.method === "notifications/claude/channel" && m.params?.meta?.job_id === disp.job_id, 600),
+      "sessão irmã B não deve ser notificada de um job que ela não despachou"
+    );
+  } finally {
+    a.stop();
+    b.stop();
+  }
+});
+
+test("e2e: dispatch_wait entrega inline → o Stop hook real da mesma sessão fica silencioso depois (dedup ponta a ponta)", async () => {
+  const env = { ...makeEnv(), RELAY_AGENT: "e2e-agent", RELAY_MCP_WAIT_POLL_MS: "50", CLAUDE_CODE_SESSION_ID: "e2e-sess-1" };
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    // Baseline: SessionStart seeds an empty store for this session (real hook binary).
+    runHook(
+      { hook_event_name: "SessionStart", cwd: env.CLAUDE_PROJECT_DIR, session_id: "e2e-sess-1" },
+      { RELAY_AGENT: "e2e-agent", CLAUDE_CODE_SESSION_ID: "e2e-sess-1", CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }
+    );
+
+    const pending = server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: { to: "codex", task: { prompt: "x" }, request_id: "e2e1", timeout_ms: 5000 }
+    });
+    let job = null;
+    for (let i = 0; i < 50 && !job; i++) {
+      job = relayOp(env, (cwd) => relay.findByRequestId(cwd, "e2e1"));
+      if (!job) await sleep(20);
+    }
+    assert.ok(job, "job deveria estar no store antes do teto de espera");
+    relayOp(env, (cwd) => {
+      const c = relay.claim(cwd, job.id, "w", 10000);
+      relay.complete(cwd, job.id, c.claimToken, { ok: 1 });
+    });
+    const res = await pending; // dispatch_wait entrega inline e grava a chave terminal no owned-file
+    const payload = JSON.parse(res.result.content[0].text);
+    assert.equal(payload.timed_out, false);
+
+    // O Stop hook REAL da MESMA sessão, rodando como processo separado, não deve
+    // notificar de novo a mesma transição já entregue inline pelo dispatch_wait.
+    const out = runHook(
+      { hook_event_name: "Stop", cwd: env.CLAUDE_PROJECT_DIR, session_id: "e2e-sess-1" },
+      { RELAY_AGENT: "e2e-agent", CLAUDE_CODE_SESSION_ID: "e2e-sess-1", CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }
+    );
+    assert.equal(out, "", "dedup ponta a ponta: dispatch_wait já entregou, o hook não deve duplicar");
+  } finally {
+    server.stop();
+  }
+});
+
+test("owned-file: ensureOwnedFile no startup do servidor já protege uma sessão irmã que nunca despachou nada", async () => {
+  const base = { ...makeEnv(), RELAY_AGENT: "alice" };
+  const a = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "fresh-sib-A" });
+  const b = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "fresh-sib-B" });
+  try {
+    await initialize(a);
+    await initialize(b);
+
+    // Seed BOTH sessions while the store is still empty — same shape as the
+    // "duas sessões" test above, so the later terminal transition is genuinely
+    // NEW for both baselines and the assertion actually exercises the whitelist,
+    // not just "no baseline yet -> seed and allow".
+    runHook(
+      { hook_event_name: "SessionStart", cwd: base.CLAUDE_PROJECT_DIR, session_id: "fresh-sib-A" },
+      { RELAY_AGENT: "alice", CLAUDE_CODE_SESSION_ID: "fresh-sib-A", CLAUDE_PLUGIN_DATA: base.CLAUDE_PLUGIN_DATA }
+    );
+    runHook(
+      { hook_event_name: "SessionStart", cwd: base.CLAUDE_PROJECT_DIR, session_id: "fresh-sib-B" },
+      { RELAY_AGENT: "alice", CLAUDE_CODE_SESSION_ID: "fresh-sib-B", CLAUDE_PLUGIN_DATA: base.CLAUDE_PLUGIN_DATA }
+    );
+
+    // B never dispatches anything of its own — before ensureOwnedFile() this meant
+    // no owned-file at all, so B fell back fully to legacy (agentId-only) filtering
+    // and could still be woken by A's job. Now B gets an (empty) owned-file at
+    // server startup, so the whitelist genuinely applies from the very first check.
+    const disp = JSON.parse(
+      (await a.request("tools/call", {
+        name: "dispatch",
+        arguments: { to: "codex", task: { prompt: "x" }, request_id: "r-fresh-sibling" }
+      })).result.content[0].text
+    );
+    relayOp(base, (cwd) => {
+      const c = relay.claim(cwd, disp.job_id, "w", 10000);
+      relay.complete(cwd, disp.job_id, c.claimToken, { ok: 1 });
+    });
+
+    const outB = runHook(
+      { hook_event_name: "Stop", cwd: base.CLAUDE_PROJECT_DIR, session_id: "fresh-sib-B" },
+      { RELAY_AGENT: "alice", CLAUDE_CODE_SESSION_ID: "fresh-sib-B", CLAUDE_PLUGIN_DATA: base.CLAUDE_PLUGIN_DATA }
+    );
+    assert.equal(outB, "", "sessão irmã sem nenhum dispatch próprio já está protegida desde o startup do servidor");
+
+    const outA = runHook(
+      { hook_event_name: "Stop", cwd: base.CLAUDE_PROJECT_DIR, session_id: "fresh-sib-A" },
+      { RELAY_AGENT: "alice", CLAUDE_CODE_SESSION_ID: "fresh-sib-A", CLAUDE_PLUGIN_DATA: base.CLAUDE_PLUGIN_DATA }
+    );
+    const parsed = JSON.parse(outA);
+    assert.equal(parsed.decision, "block", "a sessão que de fato despachou continua sendo notificada normalmente");
+  } finally {
+    a.stop();
+    b.stop();
   }
 });
 
