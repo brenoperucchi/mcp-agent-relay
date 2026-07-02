@@ -225,7 +225,13 @@ const TOOLS = [
       type: "object",
       properties: {
         to: { type: "string", description: "Target agent id" },
-        task: { description: "Opaque task payload (any JSON)" },
+        task: {
+          description:
+            "Opaque task payload (any JSON). For the codex worker: 'prompt' (string, required), " +
+            "'write' (bool, default false — allows file writes), 'worktree' (bool, default false — " +
+            "when combined with write:true, runs the turn in an isolated git worktree/branch instead " +
+            "of the main working tree; see README 'Write jobs in an isolated worktree')."
+        },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" }
       },
@@ -242,7 +248,13 @@ const TOOLS = [
       type: "object",
       properties: {
         to: { type: "string", description: "Target agent id" },
-        task: { description: "Opaque task payload (any JSON)" },
+        task: {
+          description:
+            "Opaque task payload (any JSON). For the codex worker: 'prompt' (string, required), " +
+            "'write' (bool, default false — allows file writes), 'worktree' (bool, default false — " +
+            "when combined with write:true, runs the turn in an isolated git worktree/branch instead " +
+            "of the main working tree; see README 'Write jobs in an isolated worktree')."
+        },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" },
         timeout_ms: { type: "number", description: "Max time to wait for a terminal state, in ms (> 0)" }

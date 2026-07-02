@@ -224,11 +224,32 @@ finish instead of settling immediately; `RELAY_HOOK_POLL_MS` tunes the poll inte
 
 ## Swap the executor
 
-The worker calls a `runTurn(cwd, { prompt, model, write, signal })` function. The default
-(`lib/codex-executor.mjs`) runs `codex exec -s read-only|workspace-write …` and returns the
-final message via `--output-last-message`. To target a different backend, pass your own
-`runTurn` when constructing the worker — the relay, channel, and durability guarantees are
+The worker calls a `runTurn(cwd, { prompt, model, write, worktree, jobId, signal })` function.
+The default (`lib/codex-executor.mjs`) runs `codex exec -s read-only|workspace-write …` and
+returns the final message via `--output-last-message`. To target a different backend, pass your
+own `runTurn` when constructing the worker — the relay, channel, and durability guarantees are
 unchanged.
+
+---
+
+## Write jobs in an isolated worktree
+
+Set `worktree: true` alongside `write: true` in the task payload to run the turn inside a fresh
+`git worktree` (a new branch off the caller's `HEAD`) instead of the main working tree:
+
+```json
+{ "prompt": "implement TASK-192", "write": true, "worktree": true }
+```
+
+This is layered on top of `lib/codex-executor.mjs` by `lib/worktree-runner.mjs` — no separate
+flag or process is needed. The job's `result.worktree` (`{ path, branch, baseSha }`) tells the
+caller where to review and merge the diff by hand; nothing is merged automatically. If the turn
+makes no change at all (no uncommitted diff, `HEAD` unmoved), the worktree and branch are removed
+automatically. If it fails or times out (parked as `needs_recovery`) *after* making a change, the
+worktree is preserved and the job's error message includes its path for manual recovery.
+
+**Caveat:** the worktree branches from the last **commit**, not from any uncommitted state in the
+main working tree — a real behavior difference from running the turn directly in `cwd`.
 
 ---
 
