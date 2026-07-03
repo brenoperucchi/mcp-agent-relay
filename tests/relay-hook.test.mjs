@@ -47,6 +47,13 @@ test("channelKeys: terminal job dispatched by me surfaces", () => {
   assert.equal(keys[0].key, "a:completed:9");
 });
 
+test("channelKeys: needs_review job dispatched by me surfaces as terminal", () => {
+  const keys = channelKeys(j({ id: "a", from: "me", relayState: "needs_review", terminalAtMs: 9 }), "me");
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].kind, "terminal");
+  assert.equal(keys[0].key, "a:needs_review:9");
+});
+
 test("channelKeys: terminal job dispatched by someone else is ignored", () => {
   const keys = channelKeys(j({ from: "other", relayState: "completed", terminalAtMs: 9 }), "me");
   assert.equal(keys.length, 0);

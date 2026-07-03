@@ -385,6 +385,65 @@ test("dispatch_wait deduplica por request_id (mesmo job já enfileirado por disp
   }
 });
 
+test("poll e dispatch_wait (dedup) expõem risk_reason/review_kind quando o job está em needs_review", async () => {
+  const env = makeEnv();
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const disp = JSON.parse(
+      (
+        await server.request("tools/call", {
+          name: "dispatch",
+          arguments: { to: "codex", task: { prompt: "x" }, request_id: "nr1" }
+        })
+      ).result.content[0].text
+    );
+    const jobId = disp.job_id;
+
+    // Move o job pra needs_review direto pela API do store (sem worker de verdade).
+    const claimed = relayOp(env, (cwd) => relay.claim(cwd, jobId, "test-worker"));
+    assert.ok(claimed?.claimToken, "claim deveria retornar um claimToken");
+    relayOp(env, (cwd) =>
+      relay.needsReview(cwd, jobId, claimed.claimToken, {
+        reason: "toca em produção",
+        reviewKind: "predeclared"
+      })
+    );
+
+    const poll = JSON.parse(
+      (
+        await server.request("tools/call", {
+          name: "poll",
+          arguments: { job_id: jobId }
+        })
+      ).result.content[0].text
+    );
+    assert.equal(poll.state, "needs_review");
+    assert.equal(poll.risk_reason, "toca em produção");
+    assert.equal(poll.review_kind, "predeclared");
+
+    // dispatch_wait com o MESMO request_id (dedup) — prova que o campo também passa
+    // pelo caminho de dispatchWaitTool/summarize, não só pelo poll. needs_review já
+    // é terminal (CHANNEL_TERMINAL_STATES), então resolve inline sem esperar o timeout.
+    const wait = JSON.parse(
+      (
+        await server.request("tools/call", {
+          name: "dispatch_wait",
+          arguments: { to: "codex", task: { prompt: "x" }, request_id: "nr1", timeout_ms: 2000 }
+        })
+      ).result.content[0].text
+    );
+    assert.equal(wait.job_id, jobId);
+    assert.equal(wait.deduped, true);
+    assert.equal(wait.state, "needs_review");
+    assert.equal(wait.risk_reason, "toca em produção");
+    assert.equal(wait.review_kind, "predeclared");
+    assert.equal(wait.timed_out, false);
+  } finally {
+    server.stop();
+  }
+});
+
 test("dispatch_wait: timeout_ms inválido (<= 0) vira tool error", async () => {
   const server = startServer(makeEnv());
   try {
@@ -682,6 +741,54 @@ test("register_agent + resources/list + resources/read da inbox", async () => {
     assert.equal(data.jobs[0].to, "codex");
     assert.equal(data.jobs[0].relayState, "queued");
     assert.equal(data.truncated, false);
+  } finally {
+    server.stop();
+  }
+});
+
+test("resources/read da inbox NÃO vaza riskReason/reviewKind/reviewNote de um job predeclared aprovado", async () => {
+  const env = makeEnv();
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    await server.request("tools/call", { name: "register_agent", arguments: { agent_id: "codex" } });
+    const disp = JSON.parse(
+      (
+        await server.request("tools/call", {
+          name: "dispatch",
+          arguments: { to: "codex", task: { prompt: "x" }, request_id: "redact1" }
+        })
+      ).result.content[0].text
+    );
+    const jobId = disp.job_id;
+
+    const claimed = relayOp(env, (cwd) => relay.claim(cwd, jobId, "test-worker"));
+    relayOp(env, (cwd) =>
+      relay.needsReview(cwd, jobId, claimed.claimToken, {
+        reason: "toca em produção",
+        reviewKind: "predeclared"
+      })
+    );
+    // Aprovação: predeclared+approve volta pra queued mas MANTÉM riskReason/reviewKind/
+    // reviewNote no snapshot do store — a redação é responsabilidade da camada MCP, não
+    // do store (ver relay.resolveReview em lib/relay-jobs.mjs).
+    relayOp(env, (cwd) => relay.resolveReview(cwd, jobId, { approve: true, resolvedBy: "breno", note: "ok" }));
+
+    const stored = relayOp(env, (cwd) => relay.getJob(cwd, jobId));
+    assert.equal(stored.relayState, "queued");
+    assert.equal(stored.riskReason, "toca em produção"); // confirma que o store NÃO redige
+
+    const read = await server.request("resources/read", { uri: "relay://inbox/codex" });
+    const text = read.result.contents[0].text;
+    assert.ok(!text.includes("riskReason"));
+    assert.ok(!text.includes("reviewKind"));
+    assert.ok(!text.includes("reviewNote"));
+
+    const data = JSON.parse(text);
+    assert.equal(data.jobs.length, 1);
+    assert.equal(data.jobs[0].id, jobId);
+    assert.equal(data.jobs[0].relayState, "queued");
+    assert.equal(data.jobs[0].to, "codex");
   } finally {
     server.stop();
   }

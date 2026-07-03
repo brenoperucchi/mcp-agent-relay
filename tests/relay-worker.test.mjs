@@ -64,7 +64,8 @@ test("payload em string JSON é tolerado (coerce) e executa", async () => {
     }
   });
   assert.equal(r.outcome, "completed");
-  assert.equal(gotPrompt, "hi");
+  // coerce extraiu o prompt "hi" da string JSON; o postscript de revisão é sempre anexado.
+  assert.ok(gotPrompt.startsWith("hi"));
 });
 
 test("coercePayload: só string-JSON-de-objeto vira objeto; resto fica intocado", () => {
@@ -437,4 +438,151 @@ test("complete antes de cancel: cancel falha e o completed permanece", async () 
   const cancel = relay.cancel(cwd, e.jobId);
   assert.equal(cancel.ok, false);
   assert.equal(relay.getJob(cwd, e.jobId).relayState, "completed");
+});
+
+// --- needs_review (gate de revisão humana) --------------------------------
+
+test("parseReviewMarker: aceita variantes de markdown/case, extrai o motivo e remove a linha", () => {
+  const variants = [
+    "resposta ok\nRELAY_NEEDS_REVIEW: mexe com dinheiro",
+    "resposta ok\n**RELAY_NEEDS_REVIEW:** mexe com dinheiro",
+    "resposta ok\n- relay_needs_review: mexe com dinheiro",
+    "resposta ok\n`RELAY_NEEDS_REVIEW`: mexe com dinheiro",
+    "resposta ok\nRelay_Needs_Review:   mexe com dinheiro  "
+  ];
+  for (const out of variants) {
+    const p = worker.parseReviewMarker(out);
+    assert.equal(p.needsReview, true, `deveria casar: ${JSON.stringify(out)}`);
+    assert.equal(p.reason, "mexe com dinheiro");
+    assert.ok(!/relay_needs_review/i.test(p.output), "linha do marcador removida do output");
+    assert.equal(p.output, "resposta ok");
+  }
+});
+
+test("parseReviewMarker: rejeita variantes negativas (none / n/a / not needed)", () => {
+  for (const neg of ["none", "N/A", "not needed", "nenhum", "-"]) {
+    const p = worker.parseReviewMarker(`ok\nRELAY_NEEDS_REVIEW: ${neg}`);
+    assert.equal(p.needsReview, false, `deveria rejeitar: ${neg}`);
+    assert.equal(p.reason, null);
+  }
+});
+
+test("parseReviewMarker: sem marcador deixa o output intacto; só olha as últimas ~3 linhas", () => {
+  const semMarcador = "só uma resposta normal\nsegunda linha";
+  const p1 = worker.parseReviewMarker(semMarcador);
+  assert.equal(p1.needsReview, false);
+  assert.equal(p1.output, semMarcador);
+
+  const marcadorNoTopo = "RELAY_NEEDS_REVIEW: no topo\nl2\nl3\nl4\nl5";
+  const p2 = worker.parseReviewMarker(marcadorNoTopo);
+  assert.equal(p2.needsReview, false);
+  assert.equal(p2.output, marcadorNoTopo);
+});
+
+test("requireReview (predeclared) curto-circuita ANTES de startRunning/runTurn", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, {
+    requestId: "rr",
+    to: "codex",
+    payload: { prompt: "mexe com prod", requireReview: "toca produção" }
+  });
+  const c = relay.claim(cwd, e.jobId, "w1", 1000);
+  let called = false;
+  const r = await worker.processJob(cwd, c.job, c.claimToken, {
+    runTurn: async () => {
+      called = true;
+      return { ok: true, output: "x" };
+    }
+  });
+  assert.equal(called, false); // runTurn NUNCA chamado
+  assert.equal(r.outcome, "needs_review_predeclared");
+  const j = relay.getJob(cwd, e.jobId);
+  assert.equal(j.relayState, "needs_review");
+  assert.equal(j.reviewKind, "predeclared");
+  assert.equal(j.riskReason, "toca produção");
+});
+
+test("requireReview em branco/whitespace NÃO curto-circuita (roda normalmente)", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, {
+    requestId: "rr-blank",
+    to: "codex",
+    payload: { prompt: "hi", requireReview: "   " }
+  });
+  const c = relay.claim(cwd, e.jobId, "w1", 1000);
+  const r = await worker.processJob(cwd, c.job, c.claimToken, { runTurn: okTurn });
+  assert.equal(r.outcome, "completed");
+});
+
+test("reviewClearedForRun=true faz o mesmo job pular o gate e rodar normalmente", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, {
+    requestId: "rr2",
+    to: "codex",
+    payload: { prompt: "hi", requireReview: "prod" }
+  });
+  // 1ª claim → curto-circuita em needs_review (predeclared).
+  const c1 = relay.claim(cwd, e.jobId, "w1", 1000);
+  const r1 = await worker.processJob(cwd, c1.job, c1.claimToken, { runTurn: okTurn });
+  assert.equal(r1.outcome, "needs_review_predeclared");
+
+  // Operador aprova → volta a queued com reviewClearedForRun.
+  const res = relay.resolveReview(cwd, e.jobId, { approve: true, resolvedBy: "op" });
+  assert.equal(res.ok, true);
+  assert.equal(relay.getJob(cwd, e.jobId).relayState, "queued");
+
+  // 2ª claim → agora roda o turno e completa (pula o gate).
+  const c2 = relay.claim(cwd, e.jobId, "w2", 1000);
+  let called = false;
+  const r2 = await worker.processJob(cwd, c2.job, c2.claimToken, {
+    runTurn: async () => {
+      called = true;
+      return { ok: true, output: "done", threadId: "t", touchedFiles: [] };
+    }
+  });
+  assert.equal(called, true);
+  assert.equal(r2.outcome, "completed");
+  assert.equal(relay.getJob(cwd, e.jobId).relayState, "completed");
+});
+
+test("self-flag: turno com marcador entra em needs_review (selfflagged) e preserva worktree", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, { requestId: "sf", to: "codex", payload: { prompt: "faz X" } });
+  const c = relay.claim(cwd, e.jobId, "w1", 1000);
+  const wt = { path: "/tmp/wt-x", branch: "relay/sf" };
+  const r = await worker.processJob(cwd, c.job, c.claimToken, {
+    runTurn: async () => ({
+      ok: true,
+      output: "fiz X mas precisa de revisão\nRELAY_NEEDS_REVIEW: envolve pagamento real",
+      threadId: "t",
+      touchedFiles: ["a.js"],
+      worktree: wt
+    })
+  });
+  assert.equal(r.outcome, "needs_review_selfflagged");
+  const j = relay.getJob(cwd, e.jobId);
+  assert.equal(j.relayState, "needs_review");
+  assert.equal(j.reviewKind, "selfflagged");
+  assert.equal(j.riskReason, "envolve pagamento real");
+  assert.deepEqual(j.result.worktree, wt);
+  // A linha do marcador foi removida do output persistido.
+  assert.equal(j.result.output, "fiz X mas precisa de revisão");
+  assert.ok(!/RELAY_NEEDS_REVIEW/.test(j.result.output));
+});
+
+test("postscript de revisão é sempre anexado ao prompt; resposta sem marcador completa normalmente", async () => {
+  const cwd = setup();
+  const e = relay.enqueue(cwd, { requestId: "ps", to: "codex", payload: { prompt: "só responda oi" } });
+  const c = relay.claim(cwd, e.jobId, "w1", 1000);
+  let gotPrompt = null;
+  const r = await worker.processJob(cwd, c.job, c.claimToken, {
+    runTurn: async (_c, opts) => {
+      gotPrompt = opts.prompt;
+      return { ok: true, output: "oi", threadId: "t", touchedFiles: [] };
+    }
+  });
+  assert.equal(r.outcome, "completed");
+  assert.ok(gotPrompt.startsWith("só responda oi"));
+  assert.ok(gotPrompt.includes("RELAY_NEEDS_REVIEW"));
+  assert.equal(relay.getJob(cwd, e.jobId).result.output, "oi");
 });

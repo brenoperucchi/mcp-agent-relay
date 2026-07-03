@@ -267,3 +267,286 @@ test("operações com lease vencido falham (sweep-on-access requeue antes)", () 
   assert.equal(relay.startRunning(cwd, a.jobId, c.claimToken, o).ok, false);
   assert.equal(relay.getJob(cwd, a.jobId, o).relayState, "queued");
 });
+
+// --- needs_review (gate de revisão humana) --------------------------------
+
+test("needsReview: needs_review e PRUNABLE_TERMINAL_STATES estão nas constantes esperadas", () => {
+  assert.ok(relay.RELAY_STATES.includes("needs_review"));
+  assert.ok(relay.TERMINAL_STATES.includes("needs_review"));
+  assert.deepEqual([...relay.PRUNABLE_TERMINAL_STATES], ["completed", "failed", "cancelled", "expired"]);
+  // needs_review e needs_recovery são terminais mas NÃO prunáveis.
+  assert.ok(!relay.PRUNABLE_TERMINAL_STATES.includes("needs_review"));
+  assert.ok(!relay.PRUNABLE_TERMINAL_STATES.includes("needs_recovery"));
+});
+
+test("needsReview é fenced pelo claimToken (token errado falha, correto entra em needs_review)", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+
+  const bad = relay.needsReview(cwd, a.jobId, "token-errado", { reason: "x", reviewKind: "predeclared" }, o);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.reason, "stale_claim_token");
+  assert.equal(relay.getJob(cwd, a.jobId, o).relayState, "claimed");
+
+  const good = relay.needsReview(
+    cwd,
+    a.jobId,
+    c.claimToken,
+    { reason: "mexe com dinheiro", reviewKind: "predeclared" },
+    o
+  );
+  assert.equal(good.ok, true);
+  const j = relay.getJob(cwd, a.jobId, o);
+  assert.equal(j.relayState, "needs_review");
+  assert.equal(j.riskReason, "mexe com dinheiro");
+  assert.equal(j.reviewKind, "predeclared");
+  assert.equal(j.claim, null);
+});
+
+test("needsReview aceita origem claimed E running", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+
+  // a partir de claimed (predeclared)
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const ca = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  const na = relay.needsReview(cwd, a.jobId, ca.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+  assert.equal(na.ok, true);
+  assert.equal(relay.getJob(cwd, a.jobId, o).relayState, "needs_review");
+
+  // a partir de running (selfflagged)
+  const b = relay.enqueue(cwd, { requestId: "r2" }, o);
+  const cb = relay.claim(cwd, b.jobId, "w1", 1000, o);
+  relay.startRunning(cwd, b.jobId, cb.claimToken, o);
+  const nb = relay.needsReview(cwd, b.jobId, cb.claimToken, { reason: "s", reviewKind: "selfflagged" }, o);
+  assert.equal(nb.ok, true);
+  assert.equal(relay.getJob(cwd, b.jobId, o).relayState, "needs_review");
+});
+
+test("needsReview preserva worktree no result parcial (selfflagged)", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.startRunning(cwd, a.jobId, c.claimToken, o);
+  const wt = { path: "/tmp/wt", branch: "relay/x" };
+  const n = relay.needsReview(
+    cwd,
+    a.jobId,
+    c.claimToken,
+    { reason: "s", reviewKind: "selfflagged", result: { output: "parcial", threadId: "t", touchedFiles: ["a"], worktree: wt } },
+    o
+  );
+  assert.equal(n.ok, true);
+  const j = relay.getJob(cwd, a.jobId, o);
+  assert.deepEqual(j.result.worktree, wt);
+  assert.equal(j.result.output, "parcial");
+});
+
+test("needsReview em job já terminal falha com already_terminal", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.complete(cwd, a.jobId, c.claimToken, { done: true }, o);
+  const n = relay.needsReview(cwd, a.jobId, c.claimToken, { reason: "x", reviewKind: "predeclared" }, o);
+  assert.equal(n.ok, false);
+  assert.equal(n.reason, "already_terminal");
+});
+
+test("needsReview rejeita reviewKind inválido (não muda o estado do job)", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+
+  const n = relay.needsReview(cwd, a.jobId, c.claimToken, { reason: "x", reviewKind: "bogus" }, o);
+  assert.equal(n.ok, false);
+  assert.equal(n.reason, "invalid_review_kind");
+  assert.equal(relay.getJob(cwd, a.jobId, o).relayState, "claimed");
+});
+
+test("needsReview rejeita combinação errada de reviewKind x estado de origem", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+
+  // selfflagged a partir de claimed (deveria ser running) → mismatch
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const ca = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  const na = relay.needsReview(cwd, a.jobId, ca.claimToken, { reason: "s", reviewKind: "selfflagged" }, o);
+  assert.equal(na.ok, false);
+  assert.equal(na.reason, "review_kind_state_mismatch");
+  assert.equal(relay.getJob(cwd, a.jobId, o).relayState, "claimed");
+
+  // predeclared a partir de running (deveria ser claimed) → mismatch
+  const b = relay.enqueue(cwd, { requestId: "r2" }, o);
+  const cb = relay.claim(cwd, b.jobId, "w1", 1000, o);
+  relay.startRunning(cwd, b.jobId, cb.claimToken, o);
+  const nb = relay.needsReview(cwd, b.jobId, cb.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+  assert.equal(nb.ok, false);
+  assert.equal(nb.reason, "review_kind_state_mismatch");
+  assert.equal(relay.getJob(cwd, b.jobId, o).relayState, "running");
+});
+
+test("resolveReview: guard não-needs_review devolve erro estruturado (não lança)", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  // job está queued, não needs_review
+  const r = relay.resolveReview(cwd, a.jobId, { approve: true }, o);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "not_needs_review");
+  // inexistente
+  const r2 = relay.resolveReview(cwd, "inexistente", { approve: true }, o);
+  assert.equal(r2.ok, false);
+  assert.equal(r2.reason, "not_found");
+});
+
+test("resolveReview predeclared+approve volta a queued (não completed): attempts=0, reviewClearedForRun, terminalAtMs nulo", () => {
+  const { cwd } = setup();
+  const clk = mkClock(1000);
+  const o = { clock: clk.now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.needsReview(cwd, a.jobId, c.claimToken, { reason: "prod", reviewKind: "predeclared" }, o);
+
+  clk.advance(500);
+  const r = relay.resolveReview(cwd, a.jobId, { approve: true, resolvedBy: "breno", note: "ok liberado" }, o);
+  assert.equal(r.ok, true);
+  const j = relay.getJob(cwd, a.jobId, o);
+  assert.equal(j.relayState, "queued");
+  assert.equal(j.attempts, 0);
+  assert.equal(j.reviewClearedForRun, true);
+  assert.equal(j.claim, null);
+  assert.equal(j.terminalAtMs, null);
+  assert.equal(j.reviewResolvedBy, "breno");
+  assert.equal(j.reviewResolvedAtMs, 1500);
+  assert.equal(j.reviewNote, "ok liberado");
+});
+
+test("resolveReview selfflagged+approve vira completed mantendo o result original", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.startRunning(cwd, a.jobId, c.claimToken, o);
+  const result = { output: "resposta final", threadId: "t", touchedFiles: [] };
+  relay.needsReview(cwd, a.jobId, c.claimToken, { reason: "dinheiro", reviewKind: "selfflagged", result }, o);
+
+  const r = relay.resolveReview(cwd, a.jobId, { approve: true }, o);
+  assert.equal(r.ok, true);
+  const j = relay.getJob(cwd, a.jobId, o);
+  assert.equal(j.relayState, "completed");
+  assert.deepEqual(j.result, result);
+});
+
+test("resolveReview reject vira failed (qualquer kind) e reseta terminalAtMs na resolução", () => {
+  const { cwd } = setup();
+  const clk = mkClock(1000);
+  const o = { clock: clk.now };
+
+  // predeclared reject
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const ca = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.needsReview(cwd, a.jobId, ca.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+  const nrAt = relay.getJob(cwd, a.jobId, o).terminalAtMs;
+  clk.advance(1234);
+  const ra = relay.resolveReview(cwd, a.jobId, { approve: false, note: "não autorizado" }, o);
+  assert.equal(ra.ok, true);
+  const ja = relay.getJob(cwd, a.jobId, o);
+  assert.equal(ja.relayState, "failed");
+  assert.equal(ja.errorMessage, "não autorizado");
+  assert.equal(ja.terminalAtMs, nrAt + 1234); // reset na resolução, não na entrada em needs_review
+
+  // selfflagged reject usa a mensagem padrão quando note é null
+  const b = relay.enqueue(cwd, { requestId: "r2" }, o);
+  const cb = relay.claim(cwd, b.jobId, "w1", 1000, o);
+  relay.startRunning(cwd, b.jobId, cb.claimToken, o);
+  relay.needsReview(cwd, b.jobId, cb.claimToken, { reason: "s", reviewKind: "selfflagged", result: { output: "x" } }, o);
+  const rb = relay.resolveReview(cwd, b.jobId, { approve: false }, o);
+  assert.equal(rb.ok, true);
+  const jb = relay.getJob(cwd, b.jobId, o);
+  assert.equal(jb.relayState, "failed");
+  assert.equal(jb.errorMessage, "rejeitado na revisão humana");
+});
+
+test("resolveReview: defesa em profundidade — reviewKind corrompido dentro de needs_review não vira completed", () => {
+  const { cwd } = setup();
+  const o = { clock: mkClock().now };
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const c = relay.claim(cwd, a.jobId, "w1", 1000, o);
+  relay.needsReview(cwd, a.jobId, c.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+
+  // needsReview() já bloqueia reviewKind inválido na entrada — para exercitar o `else`
+  // de defesa em profundidade em resolveReview, corrompe o reviewKind diretamente no
+  // arquivo do store (nunca pelo caminho público).
+  const file = storeFile(cwd);
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  parsed.jobs.find((j) => j.id === a.jobId).reviewKind = "bogus";
+  fs.writeFileSync(file, JSON.stringify(parsed), "utf8");
+
+  const r = relay.resolveReview(cwd, a.jobId, { approve: true }, o);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "invalid_review_kind");
+  const j = relay.getJob(cwd, a.jobId, o);
+  assert.equal(j.relayState, "needs_review"); // nunca vira completed com um kind inválido
+});
+
+test("retenção: needs_review e needs_recovery sobrevivem ao sweep muito além de retentionMs", () => {
+  const { cwd } = setup();
+  const clk = mkClock(1000);
+  const o = { clock: clk.now };
+
+  const a = relay.enqueue(cwd, { requestId: "r1" }, o);
+  const ca = relay.claim(cwd, a.jobId, "w1", 100000, o);
+  relay.needsReview(cwd, a.jobId, ca.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+
+  const b = relay.enqueue(cwd, { requestId: "r2" }, o);
+  const cb = relay.claim(cwd, b.jobId, "w1", 100000, o);
+  relay.park(cwd, b.jobId, cb.claimToken, "parked", o);
+
+  // avança MUITO além da retenção padrão (24h)
+  clk.advance(1000 * 60 * 60 * 24 * 30); // 30 dias
+  const states = relay
+    .list(cwd, o)
+    .map((j) => j.relayState)
+    .sort();
+  assert.deepEqual(states, ["needs_recovery", "needs_review"]);
+});
+
+test("retenção hard-cap: descarta completed/failed antigos antes de needs_review/needs_recovery", () => {
+  const { cwd } = setup();
+  const clk = mkClock(1000);
+  const o = { clock: clk.now };
+
+  // 3 jobs terminais "normais" (completed), os mais antigos.
+  const done = [];
+  for (let i = 0; i < 3; i++) {
+    const e = relay.enqueue(cwd, { requestId: `done-${i}` }, o);
+    const c = relay.claim(cwd, e.jobId, "w1", 1000, o);
+    relay.complete(cwd, e.jobId, c.claimToken, { i }, o);
+    done.push(e.jobId);
+    clk.advance(10); // terminalAtMs crescente
+  }
+
+  // needs_review + needs_recovery (mais novos).
+  const nv = relay.enqueue(cwd, { requestId: "nv" }, o);
+  const cnv = relay.claim(cwd, nv.jobId, "w1", 1000, o);
+  relay.needsReview(cwd, nv.jobId, cnv.claimToken, { reason: "p", reviewKind: "predeclared" }, o);
+  clk.advance(10);
+  const nr = relay.enqueue(cwd, { requestId: "nr" }, o);
+  const cnr = relay.claim(cwd, nr.jobId, "w1", 1000, o);
+  relay.park(cwd, nr.jobId, cnr.claimToken, "parked", o);
+
+  // hard-cap agressivo (1) + retenção enorme (o tempo não poda nada) → só o hard-cap age.
+  // Mesmo acima do cap, os 2 jobs de revisão sobrevivem: só completed/failed são descartáveis.
+  const bigRetention = 1000 * 60 * 60 * 24 * 365;
+  const jobs = relay.list(cwd, { clock: clk.now, maxJobs: 1, retentionMs: bigRetention });
+  const ids = jobs.map((j) => j.id);
+  assert.equal(jobs.length, 2);
+  assert.ok(ids.includes(nv.jobId));
+  assert.ok(ids.includes(nr.jobId));
+  for (const d of done) assert.ok(!ids.includes(d));
+});
