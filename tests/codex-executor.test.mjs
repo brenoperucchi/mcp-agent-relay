@@ -90,3 +90,43 @@ test("a missing codex binary fails cleanly (no throw, ok=false)", async () => {
     process.env.PATH = savedPath;
   }
 });
+
+test("passes explicit model and effort to codex exec", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fake-codex-args-"));
+  const bin = path.join(dir, "codex");
+  const argvFile = path.join(dir, "argv.json");
+  fs.writeFileSync(
+    bin,
+    [
+      "#!/usr/bin/env node",
+      "const fs = require('node:fs');",
+      "fs.writeFileSync(process.env.ARGV_FILE, JSON.stringify(process.argv.slice(2)));",
+      "const outIdx = process.argv.indexOf('--output-last-message');",
+      "if (outIdx >= 0) fs.writeFileSync(process.argv[outIdx + 1], 'ok');",
+      ""
+    ].join("\n")
+  );
+  fs.chmodSync(bin, 0o755);
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "fake-codex-args-cwd-"));
+  const savedPath = process.env.PATH;
+  const savedArgv = process.env.ARGV_FILE;
+  process.env.PATH = `${dir}:${savedPath}`;
+  process.env.ARGV_FILE = argvFile;
+  try {
+    const res = await codexExecRunTurn(cwd, {
+      prompt: "hello",
+      model: "gpt-5.5",
+      effort: "xhigh"
+    });
+    assert.equal(res.ok, true);
+    const args = JSON.parse(fs.readFileSync(argvFile, "utf8"));
+    assert.ok(args.includes("-m"));
+    assert.equal(args[args.indexOf("-m") + 1], "gpt-5.5");
+    assert.ok(args.includes("-c"));
+    assert.equal(args[args.indexOf("-c") + 1], 'model_reasoning_effort="xhigh"');
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedArgv === undefined) delete process.env.ARGV_FILE;
+    else process.env.ARGV_FILE = savedArgv;
+  }
+});

@@ -1,5 +1,5 @@
 ---
-description: Inicia o workflow de orquestração multi-agente (deep-reasoner=Opus, fable-reasoner=Fable 5, fast-worker=Sonnet, codex via MCP agent relay) para uma necessidade ou plano — cobre revisão do plano em paralelo e/ou delegação da execução.
+description: Inicia o workflow de orquestração multi-agente (deep-reasoner=Opus 4.8, fable-reasoner=Fable 5, fast-worker=Sonnet, codex via MCP agent relay) para uma necessidade ou plano — cobre revisão do plano em paralelo e/ou delegação da execução.
 argument-hint: '[review|exec] <necessidade ou plano> — sem prefixo roda o fluxo completo; "review" só valida um plano; "exec" só delega execução de um plano já aprovado'
 allowed-tools: Agent, mcp__agentrelay__dispatch_wait, mcp__agentrelay__poll
 ---

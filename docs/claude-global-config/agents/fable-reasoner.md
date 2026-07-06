@@ -1,7 +1,7 @@
 ---
 name: fable-reasoner
 description: A second, independent reasoning lens — run in parallel with deep-reasoner (and codex, when available) on plan reviews and high-stakes decisions, never as a solo replacement for deep-reasoner. The value is a different model family scrutinizing the same problem, not a faster or cheaper deep-reasoner.
-model: fable
+model: claude-fable-5
 tools: Read, Grep, Glob
 ---
 

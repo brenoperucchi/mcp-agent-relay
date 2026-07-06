@@ -1,5 +1,5 @@
 ---
-description: Envia uma revisão de código pro Codex via MCP agent relay (dispatch_wait) e devolve o veredito. Roda no worker em background, sem websocket direto.
+description: Envia uma revisão de código pro Codex via MCP agent relay (dispatch_wait), usando gpt-5.5/xhigh, e devolve o veredito. Roda no worker em background, sem websocket direto.
 argument-hint: '"<o que revisar>" (ex: "o commit HEAD", "o diff atual", "lib/foo.mjs")'
 allowed-tools: mcp__agentrelay__dispatch_wait, mcp__agentrelay__poll, Bash(git:*)
 ---
@@ -36,7 +36,7 @@ escopo antes de despachar (ex: `git show --stat HEAD`, `git diff --stat`).
    ele vem sempre `[]`, hardcoded, mesmo quando o turno roda em
    `workspace-write` — não é um sinal real.)
 
-   **Se o alvo for o resultado de um `relay-implement` com `worktree: true`**:
+   **Se o alvo for o resultado de um `/codex-i` com `worktree: true`**:
    o diff NÃO está no repositório principal — está numa git worktree separada
    (o `path` retornado em `result.worktree.path` daquele job). Aponte o Codex
    explicitamente para esse path absoluto no prompt (ex.: "revise o diff em
@@ -47,10 +47,11 @@ escopo antes de despachar (ex: `git show --stat HEAD`, `git diff --stat`).
 
 2. **Despache e aguarde** com `mcp__agentrelay__dispatch_wait`:
    - `to`: `"codex"`
-   - `task`: objeto JSON com só `prompt` (a instrução do passo 1). **O worker
-     só lê `prompt`/`write`/`worktree`/`model`/`effort` do payload** — não
-     existe campo `cwd`, `kind` ou `commit`; qualquer outro campo é dado
-     opaco, ignorado silenciosamente. O diretório onde o Codex roda é fixo
+   - `task`: objeto JSON com `prompt` (a instrução do passo 1),
+     `model: "gpt-5.5"`, `effort: "xhigh"`. **O worker só lê
+     `prompt`/`write`/`worktree`/`model`/`effort` do payload** — não existe
+     campo `cwd`, `kind` ou `commit`; qualquer outro campo é dado opaco,
+     ignorado silenciosamente. O diretório onde o Codex roda é fixo
      (herdado do processo do worker), então toda referência — repositório,
      sha, e principalmente o path da worktree do item acima — precisa estar
      **no texto do `prompt`**, nunca num campo à parte. Deixe `write`/
@@ -60,7 +61,7 @@ escopo antes de despachar (ex: `git show --stat HEAD`, `git diff --stat`).
      sem re-rodar — troque o sufixo se quiser forçar nova revisão.
    - `ttl_ms`: `300000` (5 min) para um alvo pequeno (poucos arquivos/um diff
      curto). Para revisar o diff inteiro de uma implementação (saída de
-     `relay-implement`), suba para `900000` (15 min) ou mais — um diff maior
+     `/codex-i`), suba para `900000` (15 min) ou mais — um diff maior
      faz o Codex demorar mais, e se o `ttl_ms` estourar antes do turno acabar
      o job vira `expired` **silenciosamente** (sem `result`, sem `error`,
      sem sinal de que algo deu errado — só some).
