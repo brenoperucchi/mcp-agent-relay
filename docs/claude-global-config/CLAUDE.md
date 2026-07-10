@@ -10,7 +10,7 @@ purely mechanical work yourself — delegate it.
   `fast-worker` subagent.
 - **Fresh-perspective / peer-engineer problems** — when the `agentrelay` MCP
   tools are connected in this session, dispatch to the `codex` agent via
-  `mcp__agentrelay__dispatch_wait` (or the `relay-review` / `relay-implement`
+  `mcp__agentrelay__dispatch_wait` (or the `/codex-r` / `/codex-i`
   skills). Treat Codex as a peer with a different perspective, not a reviewer
   grading your work. If `agentrelay` isn't available in this project, skip
   this option.
