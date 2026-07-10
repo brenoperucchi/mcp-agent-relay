@@ -1,5 +1,5 @@
 ---
-description: Envia uma revisão de código pro Codex via MCP agent relay (dispatch_wait), usando gpt-5.5/xhigh, e devolve o veredito. Roda no worker em background, sem websocket direto.
+description: Envia uma revisão de código pro Codex via MCP agent relay (dispatch_wait), usando gpt-5.6-sol/medium, e devolve o veredito. Roda no worker em background, sem websocket direto.
 argument-hint: '"<o que revisar>" (ex: "o commit HEAD", "o diff atual", "lib/foo.mjs")'
 allowed-tools: mcp__agentrelay__dispatch_wait, mcp__agentrelay__poll, Bash(git:*)
 ---
@@ -48,7 +48,7 @@ escopo antes de despachar (ex: `git show --stat HEAD`, `git diff --stat`).
 2. **Despache e aguarde** com `mcp__agentrelay__dispatch_wait`:
    - `to`: `"codex"`
    - `task`: objeto JSON com `prompt` (a instrução do passo 1),
-     `model: "gpt-5.5"`, `effort: "xhigh"`. **O worker só lê
+     `model: "gpt-5.6-sol"`, `effort: "medium"`. **O worker só lê
      `prompt`/`write`/`worktree`/`model`/`effort` do payload** — não existe
      campo `cwd`, `kind` ou `commit`; qualquer outro campo é dado opaco,
      ignorado silenciosamente. O diretório onde o Codex roda é fixo
