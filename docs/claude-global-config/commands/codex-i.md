@@ -1,5 +1,5 @@
 ---
-description: Envia uma tarefa de implementação pro Codex via MCP agent relay (dispatch_wait), usando gpt-5.6-sol/medium e worktree própria. Roda no worker em background; NADA é escrito no working tree principal nem mergeado automaticamente.
+description: Envia uma tarefa de implementação pro Codex via MCP agent relay (dispatch_wait), usando gpt-5.6-sol/high e worktree própria. Roda no worker em background; NADA é escrito no working tree principal nem mergeado automaticamente.
 argument-hint: '"<o que implementar>" (ex: "TASK-192: adicionar validação X em lib/foo.mjs", "corrija o bug descrito na issue #42")'
 allowed-tools: mcp__agentrelay__dispatch_wait, mcp__agentrelay__poll, Bash(git:*)
 ---
@@ -44,7 +44,7 @@ passo 5.
 2. **Despache e aguarde** com `mcp__agentrelay__dispatch_wait`:
    - `to`: `"codex"`
    - `task`: objeto JSON com `prompt` (o texto acima), `write: true`,
-     `worktree: true`, `model: "gpt-5.6-sol"`, `effort: "medium"`. Esses são os
+     `worktree: true`, `model: "gpt-5.6-sol"`, `effort: "high"`. Esses são os
      únicos campos que o worker lê — não existe campo `kind`; incluir um seria
      só dado opaco ignorado.
    - `request_id`: chave idempotente derivada da tarefa (ex.:
