@@ -29,6 +29,7 @@ import {
   TERMINAL_STATES
 } from "./lib/relay-jobs.mjs";
 import { ensureWorkerSession } from "./lib/worker-lifecycle.mjs";
+import { executorIds } from "./lib/executor-registry.mjs";
 import { channelKeys as sharedChannelKeys } from "./lib/relay-hook.mjs";
 import { recordOwned, readOwned, ensureOwnedFile } from "./lib/relay-owned.mjs";
 
@@ -100,10 +101,10 @@ function waitForStoreChangeOrTimeout(ms) {
 const WORKER_AUTOSPAWN = Boolean(process.env.RELAY_WORKER_AUTOSPAWN);
 const WORKER_ALLOW_WRITES = Boolean(process.env.RELAY_WORKER_ALLOW_WRITES);
 const WORKER_AGENTS = new Set(
-  (process.env.RELAY_WORKER_AGENTS || "codex")
+  (process.env.RELAY_WORKER_AGENTS || executorIds().join(","))
     .split(",")
     .map((s) => s.trim())
-    .filter(Boolean)
+    .filter((agent) => executorIds().includes(agent))
 );
 const WORKER_INTERVAL_MS = Number(process.env.RELAY_WORKER_INTERVAL_MS) || undefined;
 
@@ -240,10 +241,9 @@ const TOOLS = [
         to: { type: "string", description: "Target agent id" },
         task: {
           description:
-            "Opaque task payload (any JSON). For the codex worker: 'prompt' (string, required), " +
-            "'write' (bool, default false — allows file writes), 'worktree' (bool, default false — " +
-            "when combined with write:true, runs the turn in an isolated git worktree/branch instead " +
-            "of the main working tree; see README 'Write jobs in an isolated worktree')."
+            "Opaque task payload (any JSON). Worker executors are selected only by 'to': codex, " +
+            "claude-opus, or claude-fable. 'prompt' is required by workers; 'write' defaults false. " +
+            "Claude executors are read-only and reject write:true."
         },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" }
@@ -263,10 +263,9 @@ const TOOLS = [
         to: { type: "string", description: "Target agent id" },
         task: {
           description:
-            "Opaque task payload (any JSON). For the codex worker: 'prompt' (string, required), " +
-            "'write' (bool, default false — allows file writes), 'worktree' (bool, default false — " +
-            "when combined with write:true, runs the turn in an isolated git worktree/branch instead " +
-            "of the main working tree; see README 'Write jobs in an isolated worktree')."
+            "Opaque task payload (any JSON). Worker executors are selected only by 'to': codex, " +
+            "claude-opus, or claude-fable. 'prompt' is required by workers; 'write' defaults false. " +
+            "Claude executors are read-only and reject write:true."
         },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" },

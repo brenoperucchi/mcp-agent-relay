@@ -51,7 +51,9 @@ function allow() {
 }
 
 function block(reason) {
-  process.stdout.write(JSON.stringify({ decision: "block", reason }));
+  // Hooks commonly run with stdout as a pipe. A regular stream write followed by
+  // process.exit() can lose the control payload before the pipe flushes.
+  fs.writeSync(1, JSON.stringify({ decision: "block", reason }));
   process.exit(0);
 }
 

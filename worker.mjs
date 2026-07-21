@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { drainOnce, runWorkerLoop } from "./lib/relay-worker.mjs";
+import { getExecutor } from "./lib/executor-registry.mjs";
 
 export function parseArgs(argv) {
   const args = {
@@ -56,6 +57,10 @@ function writeHeartbeat(file, token) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  const executor = getExecutor(args.agent);
+  if (executor?.ok === false) {
+    throw new Error(`${executor.error}; executores permitidos: codex, claude-opus, claude-fable`);
+  }
   const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const opts = { agentId: args.agent, workerId: args.workerId, allowWrites: args.allowWrites };
 

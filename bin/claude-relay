@@ -14,7 +14,7 @@
 
 export RELAY_AGENT="${RELAY_AGENT:-claude-main}"
 export RELAY_WORKER_AUTOSPAWN="${RELAY_WORKER_AUTOSPAWN:-1}"
-export RELAY_WORKER_AGENTS="${RELAY_WORKER_AGENTS:-codex}"
+export RELAY_WORKER_AGENTS="${RELAY_WORKER_AGENTS:-codex,claude-opus,claude-fable}"
 
 CHANNEL_FLAG="plugin:mcp-agent-relay@mcp-agent-relay"
 PASSTHROUGH=()

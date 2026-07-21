@@ -148,6 +148,24 @@ test("autospawn ON for an allow-listed agent: a worker daemon appears", async ()
   }
 });
 
+test("autospawn default registry starts a distinct Claude worker", async () => {
+  const env = makeEnv({ RELAY_WORKER_AUTOSPAWN: "1" });
+  const server = startServer(env);
+  try {
+    await initAndDispatch(server, "claude-opus", "g-claude");
+    let files = [];
+    for (let i = 0; i < 80; i++) {
+      files = workerStateFiles(env);
+      if (files.includes("worker-claude-opus.json")) break;
+      await delay(100);
+    }
+    assert.ok(files.includes("worker-claude-opus.json"));
+  } finally {
+    server.stop();
+    killStateWorkers(env);
+  }
+});
+
 test("autospawn ON for an allow-listed agent via dispatch_wait: a worker daemon appears", async () => {
   const env = makeEnv({ RELAY_WORKER_AUTOSPAWN: "1", RELAY_WORKER_AGENTS: "codex" });
   const server = startServer(env);
