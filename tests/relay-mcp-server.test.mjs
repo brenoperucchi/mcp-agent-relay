@@ -672,8 +672,15 @@ test("owned-file: ensureOwnedFile no startup do servidor já protege uma sessão
   const a = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "fresh-sib-A" });
   const b = startServer({ ...base, CLAUDE_CODE_SESSION_ID: "fresh-sib-B" });
   try {
-    await initialize(a);
-    await initialize(b);
+    // This assertion exercises startup ownership plus the Stop hook. Keep the
+    // channel inactive, otherwise it can legitimately record a terminal
+    // delivery before the hook is called and make the expected block disappear.
+    await a.request("initialize", {
+      protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" }
+    });
+    await b.request("initialize", {
+      protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" }
+    });
 
     // Seed BOTH sessions while the store is still empty — same shape as the
     // "duas sessões" test above, so the later terminal transition is genuinely

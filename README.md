@@ -51,7 +51,17 @@ Four layers, each independently testable:
 | **Store** | `lib/relay-jobs.mjs` | durable queue: atomic writes, interprocess lock, leases, fencing tokens, `request_id` dedup, TTL sweep, write-safety (`needs_recovery`); human-review gate (`needs_review`) |
 | **Facade** | `server.mjs` | MCP stdio server: `register_agent` / `dispatch` / `poll` + inbox resources + the channel |
 | **Worker** | `lib/relay-worker.mjs` | claims jobs, runs them with heartbeat + cooperative cancel, completes durably |
-| **Executor** | `lib/codex-executor.mjs` | the default `runTurn` — runs a Codex turn via the `codex` CLI. Swappable. |
+| **Executor registry** | `lib/executor-registry.mjs` | explicit mapping from worker id to a safe adapter; payloads never choose a command, arguments, or CLI agent. |
+| **Executor adapters** | `lib/codex-executor.mjs`, `lib/claude-executor.mjs` | run one isolated Codex or Claude Code turn and return its final response. |
+
+The relay is executor-agnostic, but intentionally **not** command-agnostic: only this
+registry selects executable programs and their fixed options.
+
+| Worker id (`to`) | Adapter | Fixed execution | Writes |
+|---|---|---|---|
+| `codex` | Codex | `codex exec` | supported only with worker `--allow-writes` |
+| `claude-opus` | Claude Code | `claude -p --agent deep-reasoner --permission-mode plan` | rejected |
+| `claude-fable` | Claude Code | `claude -p --agent fable-reasoner --permission-mode plan` | rejected |
 
 ---
 
@@ -90,7 +100,7 @@ claude mcp add --scope user agentrelay \
   node /path/to/mcp-agent-relay/server.mjs \
   -e RELAY_AGENT=claude-main \
   -e RELAY_WORKER_AUTOSPAWN=1 \
-  -e RELAY_WORKER_AGENTS=codex
+  -e RELAY_WORKER_AGENTS=codex,claude-opus,claude-fable
 ```
 
 The store defaults to `~/.mcp-agent-relay/state`. Override with `-e RELAY_DATA_DIR=/your/path`.
@@ -112,6 +122,24 @@ claude --dangerously-load-development-channels server:agentrelay
 > The `<channel source="agentrelay">` tag is the same in both cases.
 
 No build step, no runtime dependencies — Node ≥ 18.18 and the standard library only.
+
+### As an MCP server for Codex
+
+Register the local stdio server with Codex (use a project-scoped `.codex/config.toml` instead
+if this should apply only to one trusted repository):
+
+```bash
+codex mcp add agentrelay \
+  --env RELAY_WORKER_AUTOSPAWN=1 \
+  --env RELAY_WORKER_AGENTS=codex,claude-opus,claude-fable \
+  -- node /path/to/mcp-agent-relay/server.mjs
+```
+
+`codex mcp list` confirms registration. Each Codex session can then call `dispatch` or
+`dispatch_wait`; the server auto-spawns a separate worker process per selected worker id.
+Claude workers require a locally installed and authenticated `claude` CLI. If it is absent or
+authentication fails, the job fails with the CLI's error without changing user configuration or
+installing credentials.
 
 ---
 
@@ -143,13 +171,23 @@ wakes near-instantly via `fs.watch` on the store file rather than sleeping the f
 // → { "job_id": "relay-…", "timed_out": false, "state": "completed", "result": { … } }
 ```
 
+For read-only second opinions through Claude Code, choose one of the explicit worker ids:
+
+```jsonc
+{ "to": "claude-opus", "task": { "prompt": "Review the current diff for correctness and risks." }, "request_id": "review-opus-1", "timeout_ms": 120000 }
+{ "to": "claude-fable", "task": { "prompt": "Independently review the current diff; report only actionable findings." }, "request_id": "review-fable-1", "timeout_ms": 120000 }
+```
+
+Do not put `command`, `args`, `agent`, or environment settings in `task`: they are ignored by
+the adapters. `write: true` is explicitly rejected for both Claude workers in this first version.
+
 If `timeout_ms` elapses first, it returns `{ timed_out: true, state: "queued" | "running", … }` —
 the job keeps running server-side; the channel or [Stop hook](#the-stop-hook-wake-up-without-the-channel-flag)
 picks up the eventual completion instead of you having to poll for it by hand.
 
 ### Run a worker (the execution side)
 
-The worker claims queued jobs and runs them. The default executor shells out to `codex exec`:
+The worker claims queued jobs and selects the adapter from its `--agent` id (never from the task):
 
 ```bash
 # drain once and exit
@@ -160,6 +198,10 @@ node worker.mjs --agent codex --allow-writes --interval 1000
 
 # exit automatically after 5 minutes of idleness (no queued jobs)
 node worker.mjs --agent codex --idle-timeout 300000
+
+# independent, read-only Claude workers
+node worker.mjs --agent claude-opus --once
+node worker.mjs --agent claude-fable --once
 ```
 
 Write jobs are **deny-by-default** (`--allow-writes` to opt in). A write job whose lease expires
@@ -264,13 +306,17 @@ exactly as safe as the hook, just still gated behind a flag and a bug that isn't
 
 ---
 
-## Swap the executor
+## Executor adapters
 
-The worker calls a `runTurn(cwd, { prompt, model, write, worktree, jobId, signal })` function.
-The default (`lib/codex-executor.mjs`) runs `codex exec -s read-only|workspace-write …` and
-returns the final message via `--output-last-message`. To target a different backend, pass your
-own `runTurn` when constructing the worker — the relay, channel, and durability guarantees are
-unchanged.
+The worker calls a normalized `runTurn(cwd, { prompt, model, write, worktree, jobId, signal })`
+function. `lib/executor-registry.mjs` owns the production mapping. The Codex adapter remains
+compatible and returns its final message through `--output-last-message`; Claude captures stdout
+from `claude -p` and kills its process group on cancellation/timeout just like Codex.
+
+Claude limitations in this first version: read-only only, a local authenticated CLI is required,
+and no arbitrary binary, arguments, agent name, or environment may be supplied in a payload.
+Custom test adapters can still be injected when constructing a worker; they do not expand the MCP
+payload contract.
 
 ---
 
