@@ -241,9 +241,21 @@ const TOOLS = [
         to: { type: "string", description: "Target agent id" },
         task: {
           description:
-            "Opaque task payload (any JSON). Worker executors are selected only by 'to': codex, " +
-            "claude-opus, or claude-fable. 'prompt' is required by workers; 'write' defaults false. " +
-            "Claude executors are read-only and reject write:true."
+            "Task payload. It must contain a non-empty string 'prompt' (a JSON string payload is also accepted). " +
+            "Worker executors are selected only by 'to': codex, claude-opus, or claude-fable. " +
+            "'write' defaults false. " +
+            "Claude executors are read-only and reject write:true.",
+          anyOf: [
+            {
+              type: "object",
+              properties: { prompt: { type: "string", minLength: 1 } },
+              required: ["prompt"]
+            },
+            {
+              type: "string",
+              description: "Serialized JSON object containing a non-empty string 'prompt'."
+            }
+          ]
         },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" }
@@ -263,9 +275,21 @@ const TOOLS = [
         to: { type: "string", description: "Target agent id" },
         task: {
           description:
-            "Opaque task payload (any JSON). Worker executors are selected only by 'to': codex, " +
-            "claude-opus, or claude-fable. 'prompt' is required by workers; 'write' defaults false. " +
-            "Claude executors are read-only and reject write:true."
+            "Task payload. It must contain a non-empty string 'prompt' (a JSON string payload is also accepted). " +
+            "Worker executors are selected only by 'to': codex, claude-opus, or claude-fable. " +
+            "'write' defaults false. " +
+            "Claude executors are read-only and reject write:true.",
+          anyOf: [
+            {
+              type: "object",
+              properties: { prompt: { type: "string", minLength: 1 } },
+              required: ["prompt"]
+            },
+            {
+              type: "string",
+              description: "Serialized JSON object containing a non-empty string 'prompt'."
+            }
+          ]
         },
         request_id: { type: "string", description: "Idempotency key" },
         ttl_ms: { type: "number", description: "Optional job time-to-live in ms (>= 0)" },
@@ -297,6 +321,13 @@ function enqueueFromArgs(args) {
   if (args.task === undefined || args.task === null) {
     return { error: "'task' é obrigatório" };
   }
+  // Validate at the MCP boundary so malformed payloads never become durable jobs that
+  // consume a worker lease only to fail. Keep the worker-side check too: jobs can still
+  // originate from older stores or direct store callers outside this facade.
+  const task = coercePayload(args.task);
+  if (!task || typeof task.prompt !== "string" || !task.prompt) {
+    return { error: "'task.prompt' deve ser uma string não-vazia" };
+  }
   if (
     args.ttl_ms !== undefined &&
     (typeof args.ttl_ms !== "number" || !Number.isFinite(args.ttl_ms) || args.ttl_ms < 0)
@@ -307,9 +338,8 @@ function enqueueFromArgs(args) {
   if (taskBytes > MAX_TASK_BYTES) {
     return { error: `'task' excede o limite de ${MAX_TASK_BYTES} bytes` };
   }
-  // Coerce a stringified-JSON task to its object BEFORE deriving write-policy, so a write
-  // job sent as a string still parks on lease expiry (never auto-reruns a side effect).
-  const task = coercePayload(args.task);
+  // task was coerced before validation, so write-policy sees the real object even when
+  // the MCP client supplied a JSON string.
   const out = enqueue(CWD, {
     requestId: args.request_id,
     to: args.to,

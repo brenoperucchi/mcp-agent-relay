@@ -6,6 +6,9 @@ For read-only reviews dispatched through the `agentrelay` MCP server:
 
 - For `claude-opus` and `claude-fable`, call `dispatch_wait` exactly once with a
   stable `request_id` and `timeout_ms: 600000`.
+- Put the review text in `task.prompt`, for example
+  `task: { prompt: "review …" }`. A root-level `prompt`, or a `task` without a
+  non-empty string `prompt`, is invalid and must not be retried unchanged.
 - Do not loop on `agentrelay.poll` or emit progress updates while the job is running.
   Polling reads state only; it does not advance the Claude turn.
 - If `dispatch_wait` times out, inspect the job at most once, report the `job_id` and

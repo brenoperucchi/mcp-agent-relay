@@ -86,8 +86,16 @@ function startServer(env) {
 async function initAndDispatch(server, to, request_id) {
   await server.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } });
   server.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-  // payload WITHOUT a `prompt`: a real worker fails it immediately, so no codex is ever run.
-  await server.request("tools/call", { name: "dispatch", arguments: { to, task: { note: "no prompt" }, request_id } });
+  // A valid predeclared-review job starts the daemon but gates before runTurn(), so these
+  // lifecycle tests never invoke a real Codex or Claude CLI.
+  await server.request("tools/call", {
+    name: "dispatch",
+    arguments: {
+      to,
+      task: { prompt: "autospawn lifecycle probe", requireReview: "test fixture: do not execute" },
+      request_id
+    }
+  });
 }
 
 function killStateWorkers(env) {
@@ -172,12 +180,16 @@ test("autospawn ON for an allow-listed agent via dispatch_wait: a worker daemon 
   try {
     await server.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "t", version: "0" } });
     server.send({ jsonrpc: "2.0", method: "notifications/initialized" });
-    // payload WITHOUT a `prompt`: a real worker fails it immediately, so no codex is ever run.
-    // Fire-and-forget: dispatch_wait blocks until timeout_ms, but this test only cares that
-    // the enqueue triggered autospawn, not the eventual (timed-out) result.
+    // The valid predeclared-review payload starts a daemon without invoking a real CLI.
+    // Fire-and-forget: this test only cares that enqueue triggered autospawn.
     server.request("tools/call", {
       name: "dispatch_wait",
-      arguments: { to: "codex", task: { note: "no prompt" }, request_id: "g4", timeout_ms: 300 }
+      arguments: {
+        to: "codex",
+        task: { prompt: "autospawn lifecycle probe", requireReview: "test fixture: do not execute" },
+        request_id: "g4",
+        timeout_ms: 300
+      }
     });
     let files = [];
     for (let i = 0; i < 80; i++) {

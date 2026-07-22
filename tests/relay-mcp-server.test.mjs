@@ -203,6 +203,52 @@ test("tools/list expõe register_agent, dispatch, dispatch_wait e poll", async (
     for (const t of res.result.tools) {
       assert.ok(t.inputSchema && t.inputSchema.type === "object");
     }
+    for (const name of ["dispatch", "dispatch_wait"]) {
+      const task = res.result.tools.find((t) => t.name === name).inputSchema.properties.task;
+      assert.equal(task.anyOf[0].type, "object");
+      assert.deepEqual(task.anyOf[0].required, ["prompt"]);
+      assert.equal(task.anyOf[0].properties.prompt.minLength, 1);
+      assert.equal(task.anyOf[1].type, "string");
+    }
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch rejeita task sem prompt antes de criar um job", async () => {
+  const env = makeEnv();
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const res = await server.request("tools/call", {
+      name: "dispatch",
+      arguments: { to: "claude-fable", task: { note: "sem prompt" }, request_id: "missing-prompt-dispatch" }
+    });
+    assert.equal(res.result.isError, true);
+    assert.match(res.result.content[0].text, /task\.prompt/);
+    assert.equal(fs.existsSync(storeFileFor(env)), false, "payload inválido não deve criar a fila");
+  } finally {
+    server.stop();
+  }
+});
+
+test("dispatch_wait rejeita task sem prompt antes de criar um job", async () => {
+  const env = makeEnv();
+  const server = startServer(env);
+  try {
+    await initialize(server);
+    const res = await server.request("tools/call", {
+      name: "dispatch_wait",
+      arguments: {
+        to: "claude-opus",
+        task: { note: "sem prompt" },
+        request_id: "missing-prompt-wait",
+        timeout_ms: 100
+      }
+    });
+    assert.equal(res.result.isError, true);
+    assert.match(res.result.content[0].text, /task\.prompt/);
+    assert.equal(fs.existsSync(storeFileFor(env)), false, "payload inválido não deve criar a fila");
   } finally {
     server.stop();
   }
@@ -214,7 +260,7 @@ test("dispatch retorna job_id e poll devolve o estado (round-trip via store)", a
     await initialize(server);
     const disp = await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "codex", task: { do: "x" }, request_id: "r1" }
+      arguments: { to: "codex", task: { prompt: "x", do: "x" }, request_id: "r1" }
     });
     const payload = JSON.parse(disp.result.content[0].text);
     assert.ok(payload.job_id);
@@ -263,13 +309,13 @@ test("dispatch deduplica por request_id", async () => {
     const a = JSON.parse(
       (await server.request("tools/call", {
         name: "dispatch",
-        arguments: { to: "codex", task: { n: 1 }, request_id: "same" }
+        arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "same" }
       })).result.content[0].text
     );
     const b = JSON.parse(
       (await server.request("tools/call", {
         name: "dispatch",
-        arguments: { to: "codex", task: { n: 2 }, request_id: "same" }
+        arguments: { to: "codex", task: { prompt: "x", n: 2 }, request_id: "same" }
       })).result.content[0].text
     );
     assert.equal(b.job_id, a.job_id);
@@ -369,12 +415,12 @@ test("dispatch_wait deduplica por request_id (mesmo job já enfileirado por disp
     const disp = JSON.parse(
       (await server.request("tools/call", {
         name: "dispatch",
-        arguments: { to: "codex", task: { n: 1 }, request_id: "dupw" }
+        arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "dupw" }
       })).result.content[0].text
     );
     const res = await server.request("tools/call", {
       name: "dispatch_wait",
-      arguments: { to: "codex", task: { n: 2 }, request_id: "dupw", timeout_ms: 150 }
+      arguments: { to: "codex", task: { prompt: "x", n: 2 }, request_id: "dupw", timeout_ms: 150 }
     });
     const payload = JSON.parse(res.result.content[0].text);
     assert.equal(payload.job_id, disp.job_id);
@@ -450,7 +496,7 @@ test("dispatch_wait: timeout_ms inválido (<= 0) vira tool error", async () => {
     await initialize(server);
     const res = await server.request("tools/call", {
       name: "dispatch_wait",
-      arguments: { to: "codex", task: { n: 1 }, request_id: "w3", timeout_ms: 0 }
+      arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "w3", timeout_ms: 0 }
     });
     assert.equal(res.result.isError, true);
   } finally {
@@ -478,7 +524,7 @@ test("dispatch_wait em andamento não bloqueia outras mensagens (ping resolve an
     const pending = server
       .request("tools/call", {
         name: "dispatch_wait",
-        arguments: { to: "codex", task: { n: 1 }, request_id: "block1", timeout_ms: 2000 }
+        arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "block1", timeout_ms: 2000 }
       })
       .then((res) => {
         pendingSettled = true;
@@ -545,13 +591,13 @@ test("dispatch: dedup por request_id de uma segunda sessão também grava o id n
     const a = JSON.parse(
       (await s1.request("tools/call", {
         name: "dispatch",
-        arguments: { to: "codex", task: { n: 1 }, request_id: "shared-req" }
+        arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "shared-req" }
       })).result.content[0].text
     );
     const b = JSON.parse(
       (await s2.request("tools/call", {
         name: "dispatch",
-        arguments: { to: "codex", task: { n: 2 }, request_id: "shared-req" }
+        arguments: { to: "codex", task: { prompt: "x", n: 2 }, request_id: "shared-req" }
       })).result.content[0].text
     );
     assert.equal(b.job_id, a.job_id);
@@ -740,7 +786,7 @@ test("register_agent + resources/list + resources/read da inbox", async () => {
 
     await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "codex", task: { hello: 1 }, request_id: "r1" }
+      arguments: { to: "codex", task: { prompt: "x", hello: 1 }, request_id: "r1" }
     });
     const read = await server.request("resources/read", { uri: "relay://inbox/codex" });
     const data = JSON.parse(read.result.contents[0].text);
@@ -884,8 +930,8 @@ test("dois servidores MCP compartilham o store: dispatch concorrente com mesmo r
     await initialize(a);
     await initialize(b);
     const [ra, rb] = await Promise.all([
-      a.request("tools/call", { name: "dispatch", arguments: { to: "codex", task: { s: "a" }, request_id: "dup" } }),
-      b.request("tools/call", { name: "dispatch", arguments: { to: "codex", task: { s: "b" }, request_id: "dup" } })
+      a.request("tools/call", { name: "dispatch", arguments: { to: "codex", task: { prompt: "x", s: "a" }, request_id: "dup" } }),
+      b.request("tools/call", { name: "dispatch", arguments: { to: "codex", task: { prompt: "x", s: "b" }, request_id: "dup" } })
     ]);
     const ja = JSON.parse(ra.result.content[0].text);
     const jb = JSON.parse(rb.result.content[0].text);
@@ -901,7 +947,7 @@ test("requests antes do initialize são rejeitadas (-32600); ping é permitido",
   try {
     const res = await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "codex", task: { n: 1 }, request_id: "r1" }
+      arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "r1" }
     });
     assert.equal(res.error.code, -32600);
     const ping = await server.request("ping", {});
@@ -930,7 +976,7 @@ test("ttl_ms negativo vira tool error", async () => {
     await initialize(server);
     const res = await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "codex", task: { n: 1 }, request_id: "r1", ttl_ms: -5 }
+      arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "r1", ttl_ms: -5 }
     });
     assert.equal(res.result.isError, true);
   } finally {
@@ -950,7 +996,7 @@ test("agent_id com caracteres especiais faz round-trip na URI da inbox", async (
     assert.ok(uri.startsWith("relay://inbox/"));
     await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "a b/c#?", task: { ok: 1 }, request_id: "r1" }
+      arguments: { to: "a b/c#?", task: { prompt: "x", ok: 1 }, request_id: "r1" }
     });
     const read = await server.request("resources/read", { uri });
     const data = JSON.parse(read.result.contents[0].text);
@@ -986,7 +1032,7 @@ test("store corrompido → erro interno -32603, sem crash", async () => {
     await initialize(server);
     const res = await server.request("tools/call", {
       name: "dispatch",
-      arguments: { to: "codex", task: { n: 1 }, request_id: "r1" }
+      arguments: { to: "codex", task: { prompt: "x", n: 1 }, request_id: "r1" }
     });
     assert.equal(res.error.code, -32603);
     // Servidor continua vivo.
