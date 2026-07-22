@@ -6,7 +6,8 @@
       "env": {
         "CLAUDE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
         "RELAY_AGENT": "${RELAY_AGENT}",
-        "RELAY_WORKER_AUTOSPAWN": "1"
+        "RELAY_WORKER_AUTOSPAWN": "1",
+        "RELAY_WORKER_AGENTS": "codex,claude-opus,claude-fable"
       }
     }
   }
