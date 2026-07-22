@@ -15,6 +15,10 @@ For read-only reviews dispatched through the `agentrelay` MCP server:
   non-empty string `prompt`, is invalid and must not be retried unchanged.
 - Do not loop on `agentrelay.poll` or emit progress updates while the job is running.
   Polling reads state only; it does not advance the Claude turn.
-- If `dispatch_wait` returns `timed_out: true`, report its `job_id` and state. The
-  job continues server-side; wait for explicit user direction before polling it.
-- Use `poll` only for a user-requested status check or relay-failure diagnosis.
+- If `dispatch_wait` returns `timed_out: true`, retain and report its `job_id` and
+  state. Do not ask the user merely for permission to collect the requested review:
+  when the relay sends that job's terminal completion notification, perform exactly
+  one targeted `poll` and return the result. Without a completion notification,
+  return the known state and `job_id` without periodic polling.
+- Use `poll` for a user-requested status check, a terminal completion notification
+  for a review the same user requested, or relay-failure diagnosis.
